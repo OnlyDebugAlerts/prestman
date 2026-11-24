@@ -1,0 +1,48 @@
+# The HTTPS listener is reachable only on the Docker networks. Caddy sets the forwarded IP.
+map $server_port $prestman_client_ip {
+    default $remote_addr;
+    8081    $http_x_forwarded_for;
+}
+
+map $server_port $prestman_client_protocol {
+    default $scheme;
+    8081    https;
+}
+
+server {
+    listen 8080;
+    listen 8081;
+    server_name _;
+    access_log off;
+
+    resolver 127.0.0.11 valid=5s ipv6=off;
+    set $auth_host auth;
+    set $rest_host rest;
+    client_max_body_size 10m;
+
+    proxy_set_header X-Forwarded-For $prestman_client_ip;
+    proxy_set_header X-Forwarded-Proto $prestman_client_protocol;
+
+    location = /health {
+        return 204;
+    }
+
+    location = /auth/v1/token {
+        if ($http_apikey != "${ANON_KEY}") { return 401; }
+        proxy_pass http://$auth_host:9999/token$is_args$args;
+    }
+
+    location = /auth/v1/signup {
+        default_type application/json;
+        return 403 '{"message":"Ask the Prestman server administrator to create your account."}';
+    }
+
+    location ~ ^/rest/v1/rpc/(?<rpc>prestman_[a-z_]+)$ {
+        if ($http_apikey != "${ANON_KEY}") { return 401; }
+        proxy_pass http://$rest_host:3000/rpc/$rpc$is_args$args;
+    }
+
+    location / {
+        return 404;
+    }
+}

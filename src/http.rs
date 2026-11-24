@@ -8,10 +8,10 @@ use anyhow::{Context, Result, bail};
 use reqwest::{
     Method, Url,
     blocking::{Client, RequestBuilder},
-    header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
 };
 
-use crate::request::{Authorization, Pair, Request};
+use crate::request::{Authorization, Pair, Request, prepare_body};
 
 pub struct Response {
     pub status: u16,
@@ -20,7 +20,10 @@ pub struct Response {
     pub body_bytes: usize,
     pub is_json: bool,
     pub body: Arc<str>,
+    pub raw_body: Arc<str>,
     pub headers: String,
+    pub trailers: String,
+    pub grpc_server_streaming: Option<bool>,
 }
 
 pub fn client() -> Result<Client> {
@@ -33,7 +36,11 @@ pub fn client() -> Result<Client> {
 }
 
 pub fn send(client: &Client, request: Request) -> Result<Response> {
-    let outgoing = build_request(client, request)?;
+    send_with_timeout(client, request, Duration::from_secs(30))
+}
+
+pub fn send_with_timeout(client: &Client, request: Request, timeout: Duration) -> Result<Response> {
+    let outgoing = build_request(client, request)?.timeout(timeout);
     let started = Instant::now();
     let mut incoming = outgoing.send().context("Could not send the request")?;
     let status = incoming.status();
@@ -75,18 +82,23 @@ pub fn send(client: &Client, request: Request) -> Result<Response> {
         None
     };
     let is_json = declares_json || pretty_json.is_some();
-    let body = pretty_json.unwrap_or_else(|| {
-        String::from_utf8(bytes)
-            .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
-    });
+    let raw_body: Arc<str> = String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+        .into();
+    let body = pretty_json
+        .map(Arc::from)
+        .unwrap_or_else(|| raw_body.clone());
     Ok(Response {
         status: status.as_u16(),
         reason: status.canonical_reason().unwrap_or_default(),
         elapsed,
         body_bytes,
         is_json,
-        body: body.into(),
+        body,
+        raw_body,
         headers,
+        trailers: String::new(),
+        grpc_server_streaming: None,
     })
 }
 
@@ -95,8 +107,20 @@ fn build_request(client: &Client, request: Request) -> Result<RequestBuilder> {
     if !matches!(url.scheme(), "http" | "https") || !url.has_host() {
         bail!("Enter an absolute HTTP or HTTPS URL");
     }
-    let method = Method::from_bytes(request.method.as_bytes()).context("Invalid HTTP method")?;
-    let headers = parse_headers(&request.headers, !request.authorization.is_none())?;
+    let method = if request.graphql.is_some() {
+        Method::POST
+    } else {
+        Method::from_bytes(request.method.as_bytes()).context("Invalid HTTP method")?
+    };
+    let mut headers = parse_headers(&request.headers, !request.authorization.is_none())?;
+    if request.graphql.is_some() {
+        headers
+            .entry(CONTENT_TYPE)
+            .or_insert(HeaderValue::from_static("application/json"));
+        headers.entry(ACCEPT).or_insert(HeaderValue::from_static(
+            "application/graphql-response+json, application/json",
+        ));
+    }
     let mut outgoing = client.request(method, url).headers(headers);
     outgoing = match request.authorization {
         Authorization::None => outgoing,
@@ -114,8 +138,10 @@ fn build_request(client: &Client, request: Request) -> Result<RequestBuilder> {
             outgoing.basic_auth(username, Some(password))
         }
     };
-    if !request.body.is_empty() {
-        outgoing = outgoing.body(request.body);
+    if let Some(options) = &request.graphql {
+        outgoing = outgoing.body(crate::graphql::payload(&request.body, options)?);
+    } else if !request.body.is_empty() {
+        outgoing = outgoing.body(prepare_body(&request.body, &request.headers)?);
     }
     Ok(outgoing)
 }
@@ -123,7 +149,7 @@ fn build_request(client: &Client, request: Request) -> Result<RequestBuilder> {
 fn parse_headers(rows: &[Pair], replaces_authorization: bool) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     for (index, row) in rows.iter().enumerate() {
-        if row.is_blank() {
+        if !row.enabled || row.is_blank() {
             continue;
         }
         let number = index + 1;
@@ -150,6 +176,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn json_comments_are_removed_from_the_http_body_only() -> Result<()> {
+        let request = Request {
+            url: "https://example.test".into(),
+            method: "POST".into(),
+            body: "{/* comment */\"url\":\"https://example.test\",\"ok\":true // done\n}".into(),
+            ..Request::default()
+        };
+        let built = build_request(&Client::new(), request.clone())?.build()?;
+        let sent = built.body().unwrap().as_bytes().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(sent)?,
+            serde_json::json!({"url":"https://example.test","ok":true})
+        );
+        assert!(request.body.contains("/* comment */"));
+        Ok(())
+    }
+
+    #[test]
     fn authorization_options_send_one_header_and_override_manual_values() -> Result<()> {
         let client = Client::new();
         let request = Request {
@@ -157,6 +201,7 @@ mod tests {
             headers: vec![Pair {
                 name: "authorization".into(),
                 value: "Custom abc".into(),
+                ..Pair::default()
             }],
             ..Request::default()
         };
@@ -192,6 +237,35 @@ mod tests {
     }
 
     #[test]
+    fn disabled_headers_are_skipped_before_validation() -> Result<()> {
+        let request = Request {
+            url: "https://example.test".into(),
+            headers: vec![
+                Pair {
+                    name: "invalid header".into(),
+                    value: "bad\r\nvalue".into(),
+                    enabled: false,
+                },
+                Pair {
+                    name: "X-Test".into(),
+                    value: "enabled".into(),
+                    ..Pair::default()
+                },
+                Pair {
+                    name: "X-Test".into(),
+                    value: "disabled".into(),
+                    enabled: false,
+                },
+            ],
+            ..Request::default()
+        };
+        let outgoing = build_request(&Client::new(), request)?.build()?;
+        assert_eq!(outgoing.headers().get_all("x-test").iter().count(), 1);
+        assert_eq!(outgoing.headers()["x-test"], "enabled");
+        Ok(())
+    }
+
+    #[test]
     fn sends_body_and_repeated_headers_and_displays_error_status() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
@@ -216,24 +290,51 @@ mod tests {
             assert!(headers.starts_with("POST /test?x=1 HTTP/1.1\r\n"));
             assert!(headers.contains("x-test: one\r\n"));
             assert!(headers.contains("x-test: two\r\n"));
+            assert!(headers.contains("authorization: Bearer local-token\r\n"));
             assert_eq!(&body, b"{\"a\":1}");
             stream.write_all(b"HTTP/1.1 418 I'm a teapot\r\nContent-Length: 11\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"ok\":true}")
         });
-        let response = send(
-            &client,
-            Request {
+        let request = crate::variables::resolve_request(
+            &Request {
                 method: "POST".into(),
-                url: format!("http://{address}/test?x=1"),
+                url: "{{base_url}}/test?x={{number}}".into(),
                 headers: ["one", "two"]
                     .map(|value| Pair {
                         name: "X-Test".into(),
                         value: value.into(),
+                        ..Pair::default()
                     })
                     .to_vec(),
-                body: "{\"a\":1}".into(),
+                body: "{\"a\":{{number}}}".into(),
+                authorization: Authorization::Bearer {
+                    token: "{{token}}".into(),
+                },
                 ..Request::default()
             },
+            &[
+                crate::variables::Variable {
+                    name: "base_url".into(),
+                    value: format!("http://{address}"),
+                    enabled: true,
+                },
+                crate::variables::Variable {
+                    name: "number".into(),
+                    value: "999".into(),
+                    enabled: true,
+                },
+                crate::variables::Variable {
+                    name: "token".into(),
+                    value: "local-token".into(),
+                    enabled: true,
+                },
+            ],
+            &[crate::variables::Variable {
+                name: "number".into(),
+                value: "1".into(),
+                enabled: true,
+            }],
         )?;
+        let response = send(&client, request)?;
         server.join().expect("test server panicked")?;
         assert_eq!(response.status, 418);
         assert!(response.is_json);

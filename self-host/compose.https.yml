@@ -1,0 +1,26 @@
+services:
+  auth:
+    environment:
+      API_EXTERNAL_URL: https://${PRESTMAN_DOMAIN:?Pass a domain to manage.py up}
+      GOTRUE_SITE_URL: https://${PRESTMAN_DOMAIN:?Pass a domain to manage.py up}
+
+  https:
+    image: caddy:2.11.9-alpine
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      PRESTMAN_DOMAIN: ${PRESTMAN_DOMAIN:?Pass a domain to manage.py up}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [ingress]
+
+volumes:
+  caddy_data:
+  caddy_config:

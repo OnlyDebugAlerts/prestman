@@ -6,10 +6,38 @@ rust-version = "1.100"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 directories = "6"
 form_urlencoded = "1"
-gpui-kit = { version = "=0.10.0", features = ["tree-sitter"] }
+futures = "0.3"
+getrandom = "0.3"
+gpui-kit = { version = "=0.10.0", features = ["tree-sitter", "tree-sitter-javascript"] }
+gpui-webview = "=0.10.0"
+percent-encoding = "2"
+prost = "0.14"
+prost-types = "0.14"
+prost-reflect = { version = "0.16", features = ["serde"] }
+protox = "0.9"
+wry = { package = "lb-wry", version = "0.53.3" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "http2", "charset", "gzip", "brotli", "zstd", "deflate", "system-proxy"] }
+rquickjs = "0.12.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tonic = { version = "0.14", default-features = false, features = ["channel", "tls-native-roots", "gzip"] }
+tonic-reflection = { version = "0.14", default-features = false }
+tonic-prost = "0.14"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[dev-dependencies]
+tonic = { version = "0.14", features = ["transport"] }
+tonic-reflection = { version = "0.14", features = ["server"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSImage", "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.2.2", features = ["NSData", "NSGeometry", "NSObject", "NSString", "NSThread"] }

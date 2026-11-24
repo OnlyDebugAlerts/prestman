@@ -1,0 +1,3 @@
+{$PRESTMAN_DOMAIN} {
+	reverse_proxy gateway:8081
+}

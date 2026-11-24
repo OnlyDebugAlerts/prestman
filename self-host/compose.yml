@@ -1,0 +1,115 @@
+name: prestman-self-host
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: prestman
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 self-host/manage.py init}
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD:?Run python3 self-host/manage.py init}
+      REST_DB_PASSWORD: ${REST_DB_PASSWORD:?Run python3 self-host/manage.py init}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-prestman.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "prestman"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  auth:
+    image: supabase/gotrue:v2.197.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: http://127.0.0.1:${PRESTMAN_PORT:-8800}
+      GOTRUE_SITE_URL: http://127.0.0.1:${PRESTMAN_PORT:-8800}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${AUTH_DB_PASSWORD}@db:5432/prestman?sslmode=disable
+      DB_NAMESPACE: auth
+      GOTRUE_JWT_SECRET: ${JWT_SECRET:?Run python3 self-host/manage.py init}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: "3600"
+      GOTRUE_DISABLE_SIGNUP: "true"
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
+      GOTRUE_PASSWORD_MIN_LENGTH: "12"
+      GOTRUE_RATE_LIMIT_HEADER: X-Forwarded-For
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9999/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  migrate:
+    image: postgres:17-alpine
+    depends_on:
+      auth:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command: ["psql", "-h", "db", "-U", "postgres", "-d", "prestman", "-v", "ON_ERROR_STOP=1", "-f", "/setup/migrate.sql"]
+    volumes:
+      - ./migrate.sql:/setup/migrate.sql:ro
+      - ../supabase/migrations:/migrations:ro
+    networks: [backend]
+
+  rest:
+    image: postgrest/postgrest:v14.18
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${REST_DB_PASSWORD}@db:5432/prestman?sslmode=disable
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_ADMIN_SERVER_PORT: "3001"
+      PGRST_ADMIN_SERVER_HOST: localhost
+    healthcheck:
+      test: ["CMD", "postgrest", "--ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  gateway:
+    image: nginx:1.30.7-alpine
+    restart: unless-stopped
+    depends_on:
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_healthy
+    environment:
+      ANON_KEY: ${ANON_KEY:?Run python3 self-host/manage.py init}
+      NGINX_ENVSUBST_FILTER: '^ANON_KEY$'
+    ports:
+      - "127.0.0.1:${PRESTMAN_PORT:-8800}:8080"
+    volumes:
+      - ./gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    networks: [backend, ingress]
+
+networks:
+  backend:
+    internal: true
+  ingress:
+
+volumes:
+  db_data:

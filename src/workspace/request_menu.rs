@@ -1,11 +1,11 @@
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::prelude::FluentBuilder as _;
 
 use super::*;
 
 #[derive(Clone, Copy)]
 enum MenuAction {
     CopyLink,
-    Rename,
     Copy,
     Duplicate,
     Move(Option<usize>),
@@ -56,23 +56,40 @@ pub(super) fn build(
         return menu;
     };
     let entry = &view.requests[index];
+    let collection_id = entry.collection_id;
+    let export_label = if entry.draft.grpc.is_some() {
+        Some("Export gRPC request")
+    } else if entry.draft.graphql.is_some() {
+        Some("Export GraphQL request")
+    } else {
+        None
+    };
     let has_url = !entry.draft.url.trim().is_empty();
-    let can_delete = entry.saved.is_none() || view.storage.is_ok();
+    let can_delete = entry.saved.is_none() || (view.storage.is_ok() && view.team_can_edit());
     let mut destinations = view
         .collections
         .iter()
         .filter(|collection| Some(collection.id) != entry.collection_id)
-        .map(|collection| (Some(collection.id), collection.name.clone()))
+        .map(|collection| {
+            (
+                Some(collection.id),
+                crate::storage::lineage(&view.collections, collection.id)
+                    .iter()
+                    .map(|group| group.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+            )
+        })
         .collect::<Vec<_>>();
     if entry.collection_id.is_some() {
         destinations.push((None, "Ungrouped".into()));
     }
 
     let make_item = |label, action, disabled| request_item(label, &workspace, id, action, disabled);
-    let menu = menu
+    let menu = new_request_submenu(menu, workspace.clone(), collection_id, window, cx)
+        .separator()
         .item(make_item("Copy link", MenuAction::CopyLink, !has_url))
         .separator()
-        .item(make_item("Rename", MenuAction::Rename, false))
         .item(make_item("Copy", MenuAction::Copy, false))
         .item(make_item("Duplicate", MenuAction::Duplicate, false));
     let menu = if destinations.is_empty() {
@@ -93,6 +110,13 @@ pub(super) fn build(
                 })
         })
     };
+    let menu = if let Some(label) = export_label {
+        menu.item(item(label, &workspace, false, move |view, window, cx| {
+            view.export_request(id, window, cx);
+        }))
+    } else {
+        menu
+    };
     menu.separator()
         .item(make_item("Delete", MenuAction::Delete, !can_delete))
 }
@@ -101,47 +125,176 @@ pub(super) fn build_collection(
     menu: PopupMenu,
     workspace: WeakEntity<Workspace>,
     id: usize,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let Some(view) = workspace.upgrade() else {
         return menu;
     };
     let view = view.read(cx);
-    let locked = view.storage.is_err();
-    menu.item(item(
-        "New request",
+    let locked = view.storage.is_err() || !view.team_can_edit();
+    let can_publish = !view.in_team() && !locked;
+    let is_root = view
+        .collections
+        .iter()
+        .any(|group| group.id == id && group.parent_id.is_none());
+    new_request_submenu(menu, workspace.clone(), Some(id), window, cx)
+        .item(item(
+            "New folder",
+            &workspace,
+            locked,
+            move |view, window, cx| view.edit_collection(CollectionEdit::NewFolder(id), window, cx),
+        ))
+        .item(item(
+            "Variables",
+            &workspace,
+            false,
+            move |view, window, cx| {
+                view.edit_variables(VariableScope::Collection(id), window, cx);
+            },
+        ))
+        .when(is_root, |menu| {
+            menu.item(item(
+                "Export collection",
+                &workspace,
+                false,
+                move |view, window, cx| view.export_collection(id, window, cx),
+            ))
+        })
+        .when(is_root && can_publish, |menu| {
+            menu.item(item(
+                "Publish to cloud…",
+                &workspace,
+                false,
+                move |view, window, cx| {
+                    view.open_cloud(Some(id), window, cx);
+                },
+            ))
+        })
+        .separator()
+        .item(item(
+            "Delete",
+            &workspace,
+            locked,
+            move |view, window, cx| {
+                view.remove_collection(id, window, cx);
+            },
+        ))
+}
+
+fn new_request_submenu(
+    menu: PopupMenu,
+    workspace: WeakEntity<Workspace>,
+    collection_id: Option<usize>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    menu.submenu("New request", window, cx, move |menu, _, _| {
+        request_types(menu, &workspace, collection_id)
+    })
+}
+
+fn request_types(
+    menu: PopupMenu,
+    workspace: &WeakEntity<Workspace>,
+    collection_id: Option<usize>,
+) -> PopupMenu {
+    [
+        ("HTTP Request", Request::default as fn() -> Request),
+        ("gRPC Request", Request::grpc),
+        ("GraphQL Request", Request::graphql),
+    ]
+    .into_iter()
+    .fold(menu, |menu, (label, request)| {
+        menu.item(item(label, workspace, false, move |view, window, cx| {
+            if collection_id.is_none_or(|id| view.collections.iter().any(|group| group.id == id)) {
+                view.add_request(request(), collection_id, window, cx);
+            }
+        }))
+    })
+}
+
+fn collection_item(workspace: &WeakEntity<Workspace>, cx: &App) -> PopupMenuItem {
+    item(
+        "Collection",
+        workspace,
+        storage_locked(workspace, cx),
+        |view, window, cx| view.edit_collection(CollectionEdit::New, window, cx),
+    )
+}
+
+fn storage_locked(workspace: &WeakEntity<Workspace>, cx: &App) -> bool {
+    workspace.upgrade().is_none_or(|view| {
+        let view = view.read(cx);
+        view.storage.is_err() || !view.team_can_edit()
+    })
+}
+
+pub(super) fn build_add(menu: PopupMenu, workspace: WeakEntity<Workspace>, cx: &App) -> PopupMenu {
+    request_types(menu, &workspace, None)
+        .separator()
+        .item(collection_item(&workspace, cx))
+}
+
+pub(super) fn build_settings(
+    menu: PopupMenu,
+    workspace: WeakEntity<Workspace>,
+    cx: &App,
+) -> PopupMenu {
+    menu.item(item("Globals", &workspace, false, |view, window, cx| {
+        view.edit_variables(VariableScope::Global, window, cx);
+    }))
+    .item(item(
+        "Environment",
         &workspace,
         false,
-        move |view, window, cx| {
-            if view
-                .collections
-                .iter()
-                .any(|collection| collection.id == id)
-            {
-                view.add_request(Request::default(), Some(id), window, cx);
-            }
-        },
-    ))
-    .item(item(
-        "Rename",
-        &workspace,
-        locked,
-        move |view, window, cx| {
-            view.edit_collection(CollectionEdit::Rename(id), window, cx);
-        },
+        |view, window, cx| view.edit_variables(VariableScope::Environment, window, cx),
     ))
     .separator()
     .item(item(
-        "Delete empty collection",
+        "Import Swagger / OpenAPI…",
         &workspace,
-        locked || !view.collection_is_empty(id),
-        move |view, window, cx| {
-            view.remove_collection(id, window, cx);
-        },
+        storage_locked(&workspace, cx),
+        |view, window, cx| view.open_api_import(window, cx),
     ))
 }
 
+pub(super) fn build_sidebar(
+    menu: PopupMenu,
+    workspace: WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    new_request_submenu(menu, workspace.clone(), None, window, cx)
+        .item(collection_item(&workspace, cx))
+}
+
 impl Workspace {
+    pub(super) fn rename_request(
+        &mut self,
+        id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.request_index(id) else {
+            return;
+        };
+        if !self.select_request(index, window, cx) {
+            return;
+        }
+        self.request_rename = Some(RequestRename {
+            id,
+            original: self.requests[index].draft.name.clone(),
+        });
+        let title = self.requests[index].draft.title().to_owned();
+        self.name.update(cx, |name, cx| {
+            name.set_value(title, window, cx);
+            name.set_selected_range(0..name.value().len(), cx);
+            name.focus_handle(cx).focus(window, cx);
+        });
+        cx.notify();
+    }
+
     fn apply_request_menu(
         &mut self,
         id: usize,
@@ -156,13 +309,6 @@ impl Workspace {
             MenuAction::CopyLink => {
                 let url = self.requests[index].draft.url.trim().to_owned();
                 cx.write_to_clipboard(ClipboardItem::new_string(url));
-            }
-            MenuAction::Rename => {
-                self.select_request(index, window, cx);
-                self.name.update(cx, |name, cx| {
-                    name.set_selected_range(0..name.value().len(), cx);
-                    name.focus_handle(cx).focus(window, cx);
-                });
             }
             MenuAction::Copy => {
                 if let Ok(json) = serde_json::to_string_pretty(&self.requests[index].draft) {
@@ -180,22 +326,29 @@ impl Workspace {
     }
 
     fn delete_request(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let previous_selection = self.selected;
         let entry = self.requests.remove(index);
-        if entry.saved.is_some() && !self.persist("Could not delete request", cx) {
+        if index < previous_selection {
+            self.selected -= 1;
+        } else {
+            self.selected = previous_selection.min(self.requests.len().saturating_sub(1));
+        }
+        if (entry.saved.is_some() || self.in_team())
+            && !self.persist("Could not delete request", cx)
+        {
             self.requests.insert(index, entry);
+            self.selected = previous_selection;
             return;
         }
 
         self.save_error = None;
+        self.reconcile_request_tabs();
         if self.requests.is_empty() {
             self.new_request(window, cx);
             return;
         }
-        if self.selected == index {
-            self.selected = index.min(self.requests.len() - 1);
+        if previous_selection == index {
             self.show_selection(window, cx);
-        } else if index < self.selected {
-            self.selected -= 1;
         }
         cx.notify();
     }
