@@ -76,6 +76,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("left", SidebarNavigate::Left, sidebar),
         KeyBinding::new("right", SidebarNavigate::Right, sidebar),
         KeyBinding::new("enter", SidebarNavigate::Open, sidebar),
+        KeyBinding::new(
+            "escape",
+            gpui_kit::component::input::Escape,
+            Some(super::cloud::CLOUD_CONTEXT),
+        ),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([KeyBinding::new("cmd-q", QuitApplication, None)]);

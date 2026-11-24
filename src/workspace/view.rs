@@ -16,15 +16,15 @@ use super::navigation::*;
 use super::*;
 use crate::request::{Authorization, path_parameter, path_range};
 
-const BACKGROUND: u32 = 0x111118;
+pub(super) const BACKGROUND: u32 = 0x111118;
 const SIDEBAR: u32 = 0x171720;
-const SURFACE: u32 = 0x1c1c28;
+pub(super) const SURFACE: u32 = 0x1c1c28;
 pub(super) const EDITOR: u32 = 0x13131c;
 pub(super) const BORDER: u32 = 0x2c2c3b;
 const TEXT: u32 = 0xebebf5;
 pub(super) const MUTED: u32 = 0x9a99ac;
-const ACCENT: u32 = 0xb4a0ff;
-const SELECTED: u32 = 0x272039;
+pub(super) const ACCENT: u32 = 0xb4a0ff;
+pub(super) const SELECTED: u32 = 0x272039;
 pub(super) const GREEN: u32 = 0x79d8b0;
 const AMBER: u32 = 0xf1bf79;
 pub(super) const RED: u32 = 0xf49aab;
@@ -548,23 +548,10 @@ impl Workspace {
                 row()
                     .h(px(34.))
                     .px_2()
+                    .gap_1()
                     .flex_shrink_0()
-                    .child(
-                        Button::new("cloud-workspaces")
-                            .ghost()
-                            .compact()
-                            .label(if self.in_team() {
-                                "Team workspace"
-                            } else {
-                                "Cloud"
-                            })
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.open_cloud(None, window, cx)
-                                }),
-                            ),
-                    )
-                    .child(div().flex_1())
+                    .justify_end()
+                    .children(self.team_sidebar_controls(cx))
                     .child(
                         Button::new("add-sidebar-item")
                             .ghost()
@@ -864,8 +851,7 @@ impl Workspace {
                     .child(collection.name.clone()),
             )
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                if event.click_count() == 2 {
-                    this.edit_collection(CollectionEdit::Rename(id), window, cx);
+                if event.click_count() > 1 {
                     return;
                 }
                 this.sidebar_cursor = Some(SidebarTarget::Collection(id));
@@ -997,16 +983,12 @@ impl Workspace {
                         .bg(rgb(AMBER)),
                 )
             })
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 if this
                     .request_rename
                     .as_ref()
                     .is_some_and(|rename| rename.id == id)
                 {
-                    return;
-                }
-                if event.click_count() == 2 {
-                    this.rename_request(id, window, cx);
                     return;
                 }
                 if let Some(index) = this.request_index(id) {
@@ -2382,7 +2364,7 @@ fn method_color(method: &str) -> u32 {
     }
 }
 
-fn icon(name: IconName, size: f32, color: u32) -> Icon {
+pub(super) fn icon(name: IconName, size: f32, color: u32) -> Icon {
     Icon::from(name).size(px(size)).text_color(rgb(color))
 }
 

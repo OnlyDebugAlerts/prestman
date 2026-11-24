@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -11,6 +14,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::tree::{Changes, SyncResult};
+use crate::storage::CloudSessionStore;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -143,6 +147,7 @@ impl CloudConfig {
         email: &str,
         password: &str,
         signup: bool,
+        store: Option<CloudSessionStore>,
     ) -> Result<Option<CloudApi>> {
         let path = if signup {
             "/auth/v1/signup"
@@ -155,11 +160,41 @@ impl CloudConfig {
         }
         let response: AuthResponse =
             serde_json::from_value(body).context("Invalid sign-in response.")?;
-        Ok(Some(CloudApi {
-            account: response.user.id,
+        self.start_session(response, store).map(Some)
+    }
+
+    pub fn restore(&self, store: CloudSessionStore, refresh_token: &str) -> Result<CloudApi> {
+        let response = match self.refresh(refresh_token) {
+            Err(error) if error.is::<SessionExpired>() => {
+                store.forget()?;
+                return Err(error);
+            }
+            result => result?,
+        };
+        self.start_session(response, Some(store))
+    }
+
+    fn refresh(&self, refresh_token: &str) -> Result<AuthResponse> {
+        deserialize(self.post(
+            "/auth/v1/token?grant_type=refresh_token",
+            None,
+            &json!({ "refresh_token": refresh_token }),
+        )?)
+    }
+
+    fn start_session(
+        &self,
+        response: AuthResponse,
+        store: Option<CloudSessionStore>,
+    ) -> Result<CloudApi> {
+        let account = response.user.id;
+        let mut session = Session::new(response, store);
+        session.save(&self.server.url)?;
+        Ok(CloudApi {
+            account,
             config: self.clone(),
-            session: Arc::new(Mutex::new(response.into())),
-        }))
+            session: Arc::new(Mutex::new(Some(session))),
+        })
     }
 }
 
@@ -194,16 +229,30 @@ struct Session {
     access_token: String,
     refresh_token: String,
     expires_at: Instant,
+    store: Option<CloudSessionStore>,
+    needs_save: bool,
 }
 
-impl From<AuthResponse> for Session {
-    fn from(value: AuthResponse) -> Self {
+impl Session {
+    fn new(value: AuthResponse, store: Option<CloudSessionStore>) -> Self {
         Self {
             access_token: value.access_token,
             refresh_token: value.refresh_token,
             expires_at: Instant::now()
                 + Duration::from_secs(value.expires_in.saturating_sub(30).min(86400)),
+            needs_save: store.is_some(),
+            store,
         }
+    }
+
+    fn save(&mut self, origin: &str) -> Result<()> {
+        if self.needs_save
+            && let Some(store) = &self.store
+        {
+            store.save(origin, &self.refresh_token)?;
+            self.needs_save = false;
+        }
+        Ok(())
     }
 }
 
@@ -211,24 +260,38 @@ impl From<AuthResponse> for Session {
 pub struct CloudApi {
     pub account: Uuid,
     config: CloudConfig,
-    session: Arc<Mutex<Session>>,
+    session: Arc<Mutex<Option<Session>>>,
 }
 
 impl CloudApi {
+    pub fn sign_out(&self) -> Result<()> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Cloud session is unavailable."))?;
+        if let Some(store) = session.as_ref().and_then(|session| session.store.as_ref()) {
+            store.forget()?;
+        }
+        *session = None;
+        Ok(())
+    }
+
     fn rpc<T: DeserializeOwned>(&self, name: &str, body: Value) -> Result<T> {
         let mut session = self
             .session
             .lock()
             .map_err(|_| anyhow::anyhow!("Cloud session is unavailable."))?;
+        let session = session.as_mut().context("You are signed out of Cloud.")?;
+        session.save(&self.config.server.url)?;
         if Instant::now() >= session.expires_at {
-            self.refresh(&mut session)?;
+            self.refresh(session)?;
         }
         let path = format!("/rest/v1/rpc/prestman_{name}");
         let mut response = self
             .config
             .post(&path, Some(&session.access_token), &body)?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            self.refresh(&mut session)?;
+            self.refresh(session)?;
             response = self
                 .config
                 .post(&path, Some(&session.access_token), &body)?;
@@ -237,13 +300,17 @@ impl CloudApi {
     }
 
     fn refresh(&self, session: &mut Session) -> Result<()> {
-        let response: AuthResponse = deserialize(self.config.post(
-            "/auth/v1/token?grant_type=refresh_token",
-            None,
-            &json!({"refresh_token": session.refresh_token}),
-        )?)?;
-        *session = response.into();
-        Ok(())
+        let response = self.config.refresh(&session.refresh_token)?;
+        self.apply_refresh(session, response)
+    }
+
+    fn apply_refresh(&self, session: &mut Session, response: AuthResponse) -> Result<()> {
+        ensure!(
+            response.user.id == self.account,
+            "Cloud session account changed."
+        );
+        *session = Session::new(response, session.store.take());
+        session.save(&self.config.server.url)
     }
 
     pub fn workspaces(&self) -> Result<Vec<Team>> {
@@ -300,6 +367,17 @@ impl std::fmt::Display for AccessDenied {
 
 impl std::error::Error for AccessDenied {}
 
+#[derive(Debug)]
+struct SessionExpired;
+
+impl std::fmt::Display for SessionExpired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Your Cloud session has expired. Sign in again.")
+    }
+}
+
+impl std::error::Error for SessionExpired {}
+
 fn deserialize<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Result<T> {
     serde_json::from_value(read(response)?).context("Invalid response from Prestman Cloud.")
 }
@@ -317,6 +395,23 @@ fn read(response: reqwest::blocking::Response) -> Result<Value> {
     );
     let data = serde_json::from_slice::<Value>(&bytes);
     if !status.is_success() {
+        let error_code = data
+            .as_ref()
+            .ok()
+            .and_then(|body| body.get("error_code")?.as_str());
+        if status.is_client_error()
+            && matches!(
+                error_code,
+                Some(
+                    "refresh_token_not_found"
+                        | "refresh_token_already_used"
+                        | "session_not_found"
+                        | "session_expired"
+                )
+            )
+        {
+            return Err(SessionExpired.into());
+        }
         let message = data.as_ref().ok().and_then(|body| {
             ["message", "msg", "error_description"]
                 .into_iter()

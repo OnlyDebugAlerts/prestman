@@ -1,5 +1,7 @@
 mod view;
 
+pub(super) const CLOUD_CONTEXT: &str = "PrestmanCloud";
+
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
@@ -20,6 +22,7 @@ pub(super) struct CloudState {
     api: Option<CloudApi>,
     panel: Option<Panel>,
     teams: Vec<Team>,
+    teams_loaded: bool,
     mounted: Option<Mounted>,
     local: Option<LocalView>,
     pub(super) rename_version: Option<ItemRevision>,
@@ -33,6 +36,13 @@ struct Panel {
     name: Entity<InputState>,
     code: Entity<InputState>,
     invite_email: Entity<InputState>,
+    focus: FocusHandle,
+    signup: bool,
+    browsing_workspaces: bool,
+    workspace_form: Option<WorkspaceForm>,
+    invite_role: Role,
+    invite_copied: bool,
+    removing_member: Option<Uuid>,
     publication: Option<Publication>,
     members: Vec<Member>,
     invite_code: Option<Uuid>,
@@ -41,13 +51,19 @@ struct Panel {
     error: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkspaceForm {
+    Create,
+    Join,
+}
+
 impl Panel {
     fn is_busy(&self) -> bool {
         self.job.is_some()
     }
 
     fn can_close(&self) -> bool {
-        !matches!(self.job, Some(PanelJob::Command))
+        !matches!(self.job, Some(PanelJob::Command | PanelJob::Restore))
     }
 }
 
@@ -55,6 +71,7 @@ impl Panel {
 enum PanelJob {
     Refresh,
     Command,
+    Restore,
 }
 
 struct ServerEditor {
@@ -108,9 +125,11 @@ struct Mounted {
 }
 
 enum Outcome {
-    SignedIn(CloudApi, Vec<Team>),
+    SignedIn(CloudApi, Result<Vec<Team>>),
+    SignedOut,
     ConfirmEmail,
     Teams(Vec<Team>),
+    WorkspaceAdded(Team),
     Open(Team, PathBuf, Cache, Vec<Member>),
     Members(Vec<Member>),
     Invited(Uuid),
@@ -172,11 +191,18 @@ impl Workspace {
         self.cloud.panel = Some(Panel {
             server,
             server_editor,
-            email: input("Email", cx, window),
+            email: input("you@example.com", cx, window),
             password,
-            name: input("Workspace name", cx, window),
-            code: input("Invitation code", cx, window),
-            invite_email: input("Teammate's email", cx, window),
+            name: input("e.g. Platform API", cx, window),
+            code: input("Paste your invitation code", cx, window),
+            invite_email: input("teammate@example.com", cx, window),
+            focus: cx.focus_handle(),
+            signup: false,
+            browsing_workspaces: self.cloud.mounted.is_none() || publication.is_some(),
+            workspace_form: None,
+            invite_role: Role::Editor,
+            invite_copied: false,
+            removing_member: None,
             publication,
             members: Vec::new(),
             invite_code: None,
@@ -186,31 +212,53 @@ impl Workspace {
         });
         self.variable_hover = None;
         self.sync_visualizer(window, cx);
-        if let Some(panel) = self
-            .cloud
-            .panel
-            .as_ref()
-            .filter(|panel| panel.server.is_some())
-        {
-            panel.email.read(cx).focus_handle(cx).focus(window, cx);
+        if self.cloud.api.is_some() {
+            if let Some(panel) = &self.cloud.panel {
+                panel.focus.focus(window, cx);
+            }
+            self.cloud_refresh(window, cx);
+        } else {
+            self.restore_cloud_session(window, cx);
+            if let Some(panel) = &self.cloud.panel {
+                if matches!(panel.job, Some(PanelJob::Restore)) {
+                    panel.focus.focus(window, cx);
+                } else if panel.server.is_some() {
+                    panel.email.read(cx).focus_handle(cx).focus(window, cx);
+                }
+            }
         }
-        if let Some(api) = self.cloud.api.clone() {
-            if let Some(mounted) = self
-                .cloud
-                .mounted
-                .as_ref()
-                .filter(|mounted| mounted.team.role == Role::Owner)
-            {
+        cx.notify();
+    }
+
+    fn cloud_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(api), Some(panel)) = (self.cloud.api.clone(), self.cloud.panel.as_ref()) else {
+            return;
+        };
+        if panel.browsing_workspaces {
+            self.cloud_job(PanelJob::Refresh, window, cx, move || {
+                Ok(Outcome::Teams(api.workspaces()?))
+            });
+        } else if let Some(mounted) = &self.cloud.mounted {
+            if mounted.team.role == Role::Owner {
                 let id = mounted.team.id;
                 self.cloud_job(PanelJob::Refresh, window, cx, move || {
                     Ok(Outcome::Members(api.members(id)?))
                 });
-            } else {
-                self.cloud_job(PanelJob::Refresh, window, cx, move || {
-                    Ok(Outcome::Teams(api.workspaces()?))
-                });
             }
         }
+    }
+
+    fn cloud_browse(&mut self, browse: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = self.cloud.panel.as_mut().filter(|panel| !panel.is_busy()) else {
+            return;
+        };
+        panel.browsing_workspaces = browse;
+        panel.workspace_form = None;
+        panel.removing_member = None;
+        panel.error = None;
+        panel.message = None;
+        panel.focus.focus(window, cx);
+        self.cloud_refresh(window, cx);
         cx.notify();
     }
 
@@ -230,6 +278,9 @@ impl Workspace {
     fn close_cloud(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dismiss_cloud_panel() {
             self.sync_visualizer(window, cx);
+            if self.request_view_visible() {
+                self.focus_url(window, cx);
+            }
             cx.notify();
         }
     }
@@ -261,29 +312,66 @@ impl Workspace {
                 };
                 panel.job = None;
                 match result {
-                    Err(error) => panel.error = Some(format!("{error:#}")),
+                    Err(error) => {
+                        if matches!(kind, PanelJob::Restore) {
+                            panel.email.read(cx).focus_handle(cx).focus(window, cx);
+                        }
+                        panel.error = Some(format!("{error:#}"));
+                    }
                     Ok(Outcome::ConfirmEmail) => {
+                        panel.signup = false;
+                        panel.email.read(cx).focus_handle(cx).focus(window, cx);
                         panel.message =
                             Some("Check your email to confirm your account, then sign in.".into());
                     }
                     Ok(Outcome::SignedIn(api, teams)) => {
                         view.cloud.api = Some(api);
+                        panel.focus.focus(window, cx);
+                        match teams {
+                            Ok(teams) => {
+                                view.cloud.teams_loaded = true;
+                                view.cloud.teams = teams;
+                            }
+                            Err(error) => panel.error = Some(format!("{error:#}")),
+                        }
+                    }
+                    Ok(Outcome::SignedOut) => {
+                        view.cloud.api = None;
+                        view.cloud.teams.clear();
+                        view.cloud.teams_loaded = false;
+                        view.cloud.panel = None;
+                        view.open_cloud(None, window, cx);
+                    }
+                    Ok(Outcome::Teams(teams)) => {
+                        view.cloud.teams_loaded = true;
                         view.cloud.teams = teams;
                     }
-                    Ok(Outcome::Teams(teams)) => view.cloud.teams = teams,
+                    Ok(Outcome::WorkspaceAdded(team)) => {
+                        if let Some(form) = panel.workspace_form.take() {
+                            let (input, message) = match form {
+                                WorkspaceForm::Create => (&panel.name, "Workspace created"),
+                                WorkspaceForm::Join => (&panel.code, "Joined workspace"),
+                            };
+                            input.update(cx, |input, cx| input.set_value("", window, cx));
+                            panel.focus.focus(window, cx);
+                            panel.message = Some(format!("{message} · {}", team.name));
+                        }
+                        view.cloud.teams.retain(|item| item.id != team.id);
+                        view.cloud.teams.push(team);
+                    }
                     Ok(Outcome::Open(team, path, cache, members)) => {
                         panel.members = members;
                         if let Err(error) = view.mount_team(team, path, cache, window, cx) {
                             view.cloud.panel.as_mut().unwrap().error = Some(format!("{error:#}"));
                         }
                     }
-                    Ok(Outcome::Members(members)) => panel.members = members,
+                    Ok(Outcome::Members(members)) => {
+                        panel.members = members;
+                        panel.removing_member = None;
+                    }
                     Ok(Outcome::Invited(code)) => {
                         panel.invite_code = Some(code);
-                        panel.message = Some(
-                            "Send this invitation code to the teammate at the address you entered."
-                                .into(),
-                        );
+                        panel.invite_copied = false;
                     }
                     Ok(Outcome::Published) => {
                         panel.publication = None;
@@ -305,6 +393,25 @@ impl Workspace {
             return Ok(Some(server));
         }
         CloudServer::from_environment()
+    }
+
+    fn restore_cloud_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(panel), Ok(storage)) = (&mut self.cloud.panel, &self.storage) else {
+            return;
+        };
+        let Some(server) = panel.server.clone() else {
+            return;
+        };
+        let store = storage.cloud_session_store();
+        match store.load(&server.url) {
+            Ok(Some(token)) => self.cloud_job(PanelJob::Restore, window, cx, move || {
+                let api = CloudConfig::new(server)?.restore(store, &token)?;
+                let teams = api.workspaces();
+                Ok(Outcome::SignedIn(api, teams))
+            }),
+            Ok(None) => {}
+            Err(error) => panel.error = Some(format!("{error:#}")),
+        }
     }
 
     fn cloud_edit_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -366,7 +473,7 @@ impl Workspace {
             .cloud
             .panel
             .as_ref()
-            .filter(|panel| panel.server_editor.is_none())
+            .filter(|panel| panel.server_editor.is_none() && !panel.is_busy())
         else {
             return;
         };
@@ -378,17 +485,45 @@ impl Workspace {
         panel
             .password
             .update(cx, |input, cx| input.set_value("", window, cx));
+        let store = self.storage.as_ref().ok().map(Storage::cloud_session_store);
         self.cloud_job(PanelJob::Command, window, cx, move || {
             ensure!(
                 !email.is_empty() && !password.is_empty(),
                 "Enter your email and password."
             );
-            let api = CloudConfig::new(server)?.authenticate(&email, &password, signup)?;
+            let api = CloudConfig::new(server)?.authenticate(&email, &password, signup, store)?;
             match api {
-                Some(api) => Ok(Outcome::SignedIn(api.clone(), api.workspaces()?)),
+                Some(api) => {
+                    let teams = api.workspaces();
+                    Ok(Outcome::SignedIn(api, teams))
+                }
                 None => Ok(Outcome::ConfirmEmail),
             }
         });
+    }
+
+    fn cloud_workspace_form(
+        &mut self,
+        form: Option<WorkspaceForm>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = self.cloud.panel.as_mut().filter(|panel| !panel.is_busy()) else {
+            return;
+        };
+        panel.workspace_form = form;
+        panel.error = None;
+        panel.message = None;
+        if let Some(form) = form {
+            let input = match form {
+                WorkspaceForm::Create => &panel.name,
+                WorkspaceForm::Join => &panel.code,
+            };
+            input.read(cx).focus_handle(cx).focus(window, cx);
+        } else {
+            panel.focus.focus(window, cx);
+        }
+        cx.notify();
     }
 
     fn cloud_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -398,8 +533,7 @@ impl Workspace {
         let name = panel.name.read(cx).value().trim().to_owned();
         self.cloud_job(PanelJob::Command, window, cx, move || {
             ensure!(!name.is_empty(), "Enter a workspace name.");
-            api.create(&name)?;
-            Ok(Outcome::Teams(api.workspaces()?))
+            Ok(Outcome::WorkspaceAdded(api.create(&name)?))
         });
     }
 
@@ -409,8 +543,9 @@ impl Workspace {
         };
         let code = panel.code.read(cx).value().trim().to_owned();
         self.cloud_job(PanelJob::Command, window, cx, move || {
-            api.accept(Uuid::parse_str(&code).context("Enter a valid invitation code.")?)?;
-            Ok(Outcome::Teams(api.workspaces()?))
+            Ok(Outcome::WorkspaceAdded(api.accept(
+                Uuid::parse_str(&code).context("Enter a valid invitation code.")?,
+            )?))
         });
     }
 
@@ -425,6 +560,7 @@ impl Workspace {
         let email = panel.invite_email.read(cx).value().trim().to_owned();
         let id = mounted.team.id;
         self.cloud_job(PanelJob::Command, window, cx, move || {
+            ensure!(!email.is_empty(), "Enter your teammate's email address.");
             Ok(Outcome::Invited(api.invite(id, &email, role)?))
         });
     }
@@ -1089,6 +1225,8 @@ impl Workspace {
             Err(error) => {
                 if let Some(panel) = &mut self.cloud.panel {
                     panel.error = Some(format!("{error:#}"));
+                } else if let Some(mounted) = &mut self.cloud.mounted {
+                    mounted.sync_error = Some(format!("{error:#}"));
                 }
                 cx.notify();
             }
@@ -1096,15 +1234,18 @@ impl Workspace {
     }
 
     fn cloud_sign_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(api) = self.cloud.api.clone() else {
+            return;
+        };
         if let Err(error) = self.leave_team(window, cx) {
             if let Some(panel) = &mut self.cloud.panel {
                 panel.error = Some(format!("{error:#}"));
             }
         } else {
-            self.cloud.api = None;
-            self.cloud.teams.clear();
-            self.cloud.panel = None;
-            self.open_cloud(None, window, cx);
+            self.cloud_job(PanelJob::Command, window, cx, move || {
+                api.sign_out()?;
+                Ok(Outcome::SignedOut)
+            });
         }
         cx.notify();
     }

@@ -2,7 +2,8 @@ use std::{
     collections::{BTreeSet, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -120,7 +121,7 @@ enum RequestFile {
 
 pub struct Storage {
     directory: PathBuf,
-    _lock: File,
+    lock: Arc<File>,
 }
 
 impl Storage {
@@ -195,7 +196,7 @@ impl Storage {
         Ok((
             Self {
                 directory,
-                _lock: lock,
+                lock: Arc::new(lock),
             },
             workspace,
         ))
@@ -224,6 +225,13 @@ impl Storage {
         self.write_json("cloud-server.json", server)
     }
 
+    pub(crate) fn cloud_session_store(&self) -> CloudSessionStore {
+        CloudSessionStore {
+            path: self.directory.join("cloud-session.json"),
+            _workspace_lock: self.lock.clone(),
+        }
+    }
+
     pub fn save<'a>(
         &self,
         collections: &[Collection],
@@ -245,20 +253,67 @@ impl Storage {
     }
 
     fn write_json(&self, name: &str, value: &impl Serialize) -> Result<()> {
-        let path = self.directory.join(name);
-        let mut file = NamedTempFile::new_in(&self.directory)
-            .with_context(|| format!("Could not create a temporary file for {name}"))?;
-        {
-            let mut writer = BufWriter::new(file.as_file_mut());
-            serde_json::to_writer_pretty(&mut writer, value)?;
-            writer.write_all(b"\n")?;
-            writer.flush()?;
-        }
-        file.as_file().sync_all()?;
-        file.persist(&path)
-            .with_context(|| format!("Could not replace {}", path.display()))?;
-        Ok(())
+        write_json(&self.directory.join(name), value)
     }
+}
+
+pub(crate) struct CloudSessionStore {
+    path: PathBuf,
+    _workspace_lock: Arc<File>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct SavedCloudSession {
+    origin: String,
+    refresh_token: String,
+}
+
+impl CloudSessionStore {
+    pub(crate) fn load(&self, origin: &str) -> Result<Option<String>> {
+        let file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).context("Could not open the saved cloud session"),
+        };
+        let saved: SavedCloudSession = serde_json::from_reader(BufReader::new(file))
+            .context("Could not read the saved cloud session")?;
+        Ok((saved.origin == origin).then_some(saved.refresh_token))
+    }
+
+    pub(crate) fn save(&self, origin: &str, refresh_token: &str) -> Result<()> {
+        write_json(
+            &self.path,
+            &SavedCloudSession {
+                origin: origin.into(),
+                refresh_token: refresh_token.into(),
+            },
+        )
+        .context("Could not save the cloud session")
+    }
+
+    pub(crate) fn forget(&self) -> Result<()> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("Could not remove the saved cloud session"),
+        }
+    }
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let directory = path.parent().context("Missing data directory")?;
+    let mut file = NamedTempFile::new_in(directory)
+        .with_context(|| format!("Could not create a temporary file for {}", path.display()))?;
+    {
+        let mut writer = BufWriter::new(file.as_file_mut());
+        serde_json::to_writer_pretty(&mut writer, value)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+    file.as_file().sync_all()?;
+    file.persist(path)
+        .with_context(|| format!("Could not replace {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]

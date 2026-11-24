@@ -4,7 +4,20 @@ use gpui_kit::{AssetSource, SharedString, assets};
 
 assets::icon_assets!(
     ExtraIcons,
-    [ListFilter, Code, Library, Copy, Lock, LockOpen]
+    [
+        ListFilter,
+        Code,
+        Library,
+        Copy,
+        Lock,
+        LockOpen,
+        Cloud,
+        CloudUpload,
+        Layers,
+        Server,
+        User,
+        UserPlus
+    ]
 );
 
 pub struct AppAssets;
@@ -45,6 +58,14 @@ mod tests {
             assets::IconName::Copy,
             assets::IconName::Lock,
             assets::IconName::LockOpen,
+            assets::IconName::Cloud,
+            assets::IconName::CloudUpload,
+            assets::IconName::Layers,
+            assets::IconName::Server,
+            assets::IconName::User,
+            assets::IconName::UserPlus,
+            assets::IconName::ArrowLeft,
+            assets::IconName::RefreshCw,
             assets::IconName::SquareTerminal,
             assets::IconName::CircleCheck,
             assets::IconName::Settings2,

@@ -91,7 +91,15 @@ pub(super) fn build(
         .item(make_item("Copy link", MenuAction::CopyLink, !has_url))
         .separator()
         .item(make_item("Copy", MenuAction::Copy, false))
-        .item(make_item("Duplicate", MenuAction::Duplicate, false));
+        .item(make_item("Duplicate", MenuAction::Duplicate, false))
+        .item(item(
+            "Rename",
+            &workspace,
+            false,
+            move |view, window, cx| {
+                view.rename_request(id, window, cx);
+            },
+        ));
     let menu = if destinations.is_empty() {
         menu
     } else {
@@ -144,6 +152,14 @@ pub(super) fn build_collection(
             &workspace,
             locked,
             move |view, window, cx| view.edit_collection(CollectionEdit::NewFolder(id), window, cx),
+        ))
+        .item(item(
+            "Rename",
+            &workspace,
+            locked,
+            move |view, window, cx| {
+                view.edit_collection(CollectionEdit::Rename(id), window, cx);
+            },
         ))
         .item(item(
             "Variables",
@@ -216,7 +232,7 @@ fn request_types(
 
 fn collection_item(workspace: &WeakEntity<Workspace>, cx: &App) -> PopupMenuItem {
     item(
-        "Collection",
+        "New collection",
         workspace,
         storage_locked(workspace, cx),
         |view, window, cx| view.edit_collection(CollectionEdit::New, window, cx),
@@ -249,6 +265,13 @@ pub(super) fn build_settings(
         &workspace,
         false,
         |view, window, cx| view.edit_variables(VariableScope::Environment, window, cx),
+    ))
+    .separator()
+    .item(item(
+        "Open cloud workspace",
+        &workspace,
+        false,
+        |view, window, cx| view.open_cloud(None, window, cx),
     ))
     .separator()
     .item(item(
