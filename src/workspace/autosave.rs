@@ -228,8 +228,9 @@ mod tests {
     fn failed_exit_save_keeps_previous_file_and_unsaved_state() -> anyhow::Result<()> {
         let root = tempfile::tempdir()?;
         let path = root.path().join("workspace");
-        let backup = root.path().join("moved");
-        let (storage, _) = Storage::open_in(path.clone())?;
+        let requests_path = path.join("requests.json");
+        let backup = path.join("previous-requests.json");
+        let (storage, _) = Storage::open_in(path)?;
         let mut entries = vec![Entry::new(
             0,
             None,
@@ -247,22 +248,26 @@ mod tests {
             &mut entries,
             SidebarState::default(),
         )?;
-        let previous = std::fs::read(path.join("requests.json"))?;
+        let previous = std::fs::read(&requests_path)?;
         entries[0].draft.body = "unsaved changes".into();
-        std::fs::rename(&path, &backup)?;
+        // An existing directory blocks the atomic replacement on each platform.
+        std::fs::rename(&requests_path, &backup)?;
+        std::fs::create_dir(&requests_path)?;
+        let error = save_drafts(
+            &storage,
+            &[],
+            &[],
+            &[],
+            &mut entries,
+            SidebarState::default(),
+        )
+        .expect_err("atomic replacement should fail when the destination is a directory");
         assert!(
-            save_drafts(
-                &storage,
-                &[],
-                &[],
-                &[],
-                &mut entries,
-                SidebarState::default()
-            )
-            .is_err()
+            error.to_string().starts_with("Could not replace "),
+            "{error:#}"
         );
         assert!(entries[0].is_dirty());
-        assert_eq!(std::fs::read(backup.join("requests.json"))?, previous);
+        assert_eq!(std::fs::read(&backup)?, previous);
         Ok(())
     }
 }

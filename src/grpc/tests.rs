@@ -392,17 +392,19 @@ fn tls_handshake_gives_a_plaintext_hint_for_an_http2_endpoint() -> Result<()> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let mut request = Request::grpc();
     request.url = format!("grpcs://{}", listener.local_addr()?);
-    let server = thread::spawn(move || -> Result<()> {
+    let server = thread::spawn(move || -> Result<_> {
         let (mut socket, _) = listener.accept()?;
         socket.set_read_timeout(Some(Duration::from_secs(3)))?;
         let mut first_byte = [0];
         socket.read_exact(&mut first_byte)?;
         // Plaintext HTTP/2 SETTINGS, as sent by servers that speak h2c.
         socket.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0])?;
-        Ok(())
+        // Closing with unread ClientHello bytes can reset the connection on Windows.
+        Ok(socket)
     });
-    let error = discover(&request).expect_err("a plaintext endpoint cannot negotiate TLS");
-    server.join().expect("test server panicked")?;
+    let result = discover(&request);
+    let _server_socket = server.join().expect("test server panicked")?;
+    let error = result.expect_err("a plaintext endpoint cannot negotiate TLS");
     assert!(format!("{error:#}").contains("Use grpc://"), "{error:#}");
     Ok(())
 }
