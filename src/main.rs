@@ -13,6 +13,7 @@ mod openapi;
 mod request;
 mod scripts;
 mod storage;
+mod updater;
 mod variables;
 mod visualizer;
 mod workspace;

@@ -257,6 +257,15 @@ pub(super) fn build_settings(
         storage_locked(&workspace, cx),
         |view, window, cx| view.open_api_import(window, cx),
     ))
+    .separator()
+    .item(item(
+        format!("Check for updates… (v{})", crate::updater::VERSION),
+        &workspace,
+        workspace
+            .upgrade()
+            .is_none_or(|view| !view.read(cx).updates.can_check()),
+        |view, window, cx| view.check_for_updates(true, window, cx),
+    ))
 }
 
 pub(super) fn build_sidebar(
