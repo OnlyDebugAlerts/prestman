@@ -64,11 +64,48 @@ jobs:
           rustup target add ${{ matrix.target }}
           cargo build --locked --release --bin prestman --target ${{ matrix.target }}
 
-      - name: Package macOS or Linux binary
-        if: runner.os != 'Windows'
+      - name: Package macOS application
+        if: runner.os == 'macOS'
+        run: |
+          staging_dir=$(mktemp -d)
+          trap 'rm -rf "$staging_dir"' EXIT
+          app="$staging_dir/Prestman.app"
+          plist="$app/Contents/Info.plist"
+          mkdir -p "$app/Contents/MacOS" dist
+          install -m 755 "target/$RUST_TARGET/release/prestman" "$app/Contents/MacOS/prestman"
+
+          cat > "$plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>
+            <string>prestman</string>
+            <key>CFBundleIdentifier</key>
+            <string>io.github.onlydebugalerts.prestman</string>
+            <key>CFBundleName</key>
+            <string>Prestman</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+          </dict>
+          </plist>
+          PLIST
+
+          version="${RELEASE_TAG#v}"
+          version="${version%%[-+]*}"
+          plutil -insert CFBundleShortVersionString -string "$version" "$plist"
+          plutil -insert CFBundleVersion -string "$version" "$plist"
+          plutil -insert LSMinimumSystemVersion -string "$MACOSX_DEPLOYMENT_TARGET" "$plist"
+          plutil -lint "$plist"
+          codesign --force --sign - "$app"
+          codesign --verify --strict "$app"
+          ditto -c -k --keepParent "$app" "dist/prestman-$PACKAGE.zip"
+
+      - name: Package Linux binary
+        if: runner.os == 'Linux'
         run: |
           mkdir -p dist
-          COPYFILE_DISABLE=1 tar -czf "dist/prestman-$PACKAGE.tar.gz" \
+          tar -czf "dist/prestman-$PACKAGE.tar.gz" \
             -C "target/$RUST_TARGET/release" prestman
 
       - name: Package Windows executable
