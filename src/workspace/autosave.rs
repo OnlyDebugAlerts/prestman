@@ -28,6 +28,10 @@ fn save_drafts(
 
 impl Workspace {
     pub(super) fn save_before_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.updates.installing() {
+            cx.notify();
+            return false;
+        }
         match self.save_on_exit(cx) {
             Ok(()) => true,
             Err(error) => {

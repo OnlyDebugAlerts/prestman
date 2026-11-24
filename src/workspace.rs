@@ -12,6 +12,7 @@ mod request_menu;
 mod response_highlight;
 mod response_links;
 mod scripts;
+mod updates;
 mod url_highlight;
 mod variable_hover;
 mod variables;
@@ -192,6 +193,7 @@ struct RequestRename {
 pub struct Workspace {
     storage: Result<Storage, String>,
     save_error: Option<String>,
+    updates: updates::UpdateState,
     cloud: cloud::CloudState,
     client: Result<Client, String>,
     requests: Vec<Entry>,
@@ -437,6 +439,7 @@ impl Workspace {
         let mut workspace = Self {
             storage,
             save_error: None,
+            updates: updates::UpdateState::default(),
             cloud: cloud::CloudState::default(),
             client: http::client().map_err(|error| format!("{error:#}")),
             next_request_id: requests.len(),
@@ -485,6 +488,7 @@ impl Workspace {
         };
         workspace.restore_selection(window, cx);
         workspace.focus_url(window, cx);
+        workspace.start_update_checks(window, cx);
         workspace
     }
 

@@ -192,9 +192,11 @@ impl Render for Workspace {
                             .gap_2()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(img("prestman-logo.png").size(px(22.)))
-                            .child("Prestman"),
+                            .child("Prestman")
+                            .children(self.update_button(cx)),
                     ),
             )
+            .children(self.update_status(cx))
             .child(
                 div()
                     .flex()

@@ -26,12 +26,17 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+self_update = { version = "1.3.3", default-features = false, features = ["ureq", "rustls", "github", "archive-tar", "compression-tar-gz", "archive-zip", "compression-zip-deflate", "checksums"] }
+semver = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tonic = { version = "0.14", default-features = false, features = ["channel", "tls-native-roots", "gzip"] }
 tonic-reflection = { version = "0.14", default-features = false }
 tonic-prost = "0.14"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[build-dependencies]
+semver = "1"
 
 [dev-dependencies]
 tonic = { version = "0.14", features = ["transport"] }
