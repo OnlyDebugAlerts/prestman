@@ -16,6 +16,7 @@ use crate::cloud::{
     AccessDenied, Cache, Changes, CloudApi, CloudConfig, CloudServer, Content, Draft, ItemRevision,
     Member, Role, SyncResult, Team, share_request,
 };
+use crate::storage::SavedCloudWorkspace;
 
 #[derive(Default)]
 pub(super) struct CloudState {
@@ -30,6 +31,7 @@ pub(super) struct CloudState {
 
 struct Panel {
     server: Option<CloudServer>,
+    restore_workspace: Option<SavedCloudWorkspace>,
     server_editor: Option<ServerEditor>,
     email: Entity<InputState>,
     password: Entity<InputState>,
@@ -130,7 +132,7 @@ enum Outcome {
     ConfirmEmail,
     Teams(Vec<Team>),
     WorkspaceAdded(Team),
-    Open(Team, PathBuf, Cache, Vec<Member>),
+    Open(Team, PathBuf, Cache),
     Members(Vec<Member>),
     Invited(Uuid),
     Published,
@@ -155,6 +157,31 @@ impl Workspace {
     pub(super) fn open_cloud(
         &mut self,
         publish_root: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_cloud(publish_root, None, window, cx);
+    }
+
+    pub(super) fn restore_active_cloud_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(storage) = &self.storage else {
+            return;
+        };
+        match storage.load_active_cloud_workspace() {
+            Ok(Some(workspace)) => self.show_cloud(None, Some(workspace), window, cx),
+            Ok(None) => {}
+            Err(error) => self.save_error = Some(format!("{error:#}")),
+        }
+    }
+
+    fn show_cloud(
+        &mut self,
+        publish_root: Option<usize>,
+        restore_workspace: Option<SavedCloudWorkspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -190,6 +217,7 @@ impl Workspace {
             .then(|| ServerEditor::new(None, window, cx));
         self.cloud.panel = Some(Panel {
             server,
+            restore_workspace,
             server_editor,
             email: input("you@example.com", cx, window),
             password,
@@ -328,10 +356,7 @@ impl Workspace {
                         view.cloud.api = Some(api);
                         panel.focus.focus(window, cx);
                         match teams {
-                            Ok(teams) => {
-                                view.cloud.teams_loaded = true;
-                                view.cloud.teams = teams;
-                            }
+                            Ok(teams) => view.cloud_apply_teams(teams, window, cx),
                             Err(error) => panel.error = Some(format!("{error:#}")),
                         }
                     }
@@ -342,10 +367,7 @@ impl Workspace {
                         view.cloud.panel = None;
                         view.open_cloud(None, window, cx);
                     }
-                    Ok(Outcome::Teams(teams)) => {
-                        view.cloud.teams_loaded = true;
-                        view.cloud.teams = teams;
-                    }
+                    Ok(Outcome::Teams(teams)) => view.cloud_apply_teams(teams, window, cx),
                     Ok(Outcome::WorkspaceAdded(team)) => {
                         if let Some(form) = panel.workspace_form.take() {
                             let (input, message) = match form {
@@ -359,8 +381,7 @@ impl Workspace {
                         view.cloud.teams.retain(|item| item.id != team.id);
                         view.cloud.teams.push(team);
                     }
-                    Ok(Outcome::Open(team, path, cache, members)) => {
-                        panel.members = members;
+                    Ok(Outcome::Open(team, path, cache)) => {
                         if let Err(error) = view.mount_team(team, path, cache, window, cx) {
                             view.cloud.panel.as_mut().unwrap().error = Some(format!("{error:#}"));
                         }
@@ -384,6 +405,36 @@ impl Workspace {
         })
         .detach();
         cx.notify();
+    }
+
+    fn cloud_apply_teams(&mut self, teams: Vec<Team>, window: &mut Window, cx: &mut Context<Self>) {
+        self.cloud.teams_loaded = true;
+        self.cloud.teams = teams;
+        let (Some(panel), Some(api), Ok(storage)) =
+            (&mut self.cloud.panel, &self.cloud.api, &self.storage)
+        else {
+            return;
+        };
+        let Some(saved) = panel
+            .restore_workspace
+            .take()
+            .filter(|saved| saved.account == api.cache_key())
+        else {
+            return;
+        };
+        if let Some(team) = self
+            .cloud
+            .teams
+            .iter()
+            .find(|team| team.id == saved.workspace)
+        {
+            self.cloud_open_team(team.clone(), window, cx);
+        } else {
+            panel.error = Some(match storage.clear_active_cloud_workspace() {
+                Ok(()) => "The last cloud workspace is no longer available.".into(),
+                Err(error) => format!("{error:#}"),
+            });
+        }
     }
 
     fn load_cloud_server(&self) -> Result<Option<CloudServer>> {
@@ -601,12 +652,7 @@ impl Workspace {
             let result = api.sync(team.id, &Changes::new(), cache.remote_revision)?;
             team.role = result.role;
             cache.acknowledge(result, &Changes::new());
-            let members = if team.role == Role::Owner {
-                api.members(team.id)?
-            } else {
-                Vec::new()
-            };
-            Ok(Outcome::Open(team, path, cache, members))
+            Ok(Outcome::Open(team, path, cache))
         });
     }
 
@@ -705,6 +751,19 @@ impl Workspace {
         }
         self.save_on_exit(cx)?;
         self.exit_saved = false;
+        let storage = self
+            .storage
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let api = self
+            .cloud
+            .api
+            .as_ref()
+            .context("Cloud session is unavailable.")?;
+        storage.save_active_cloud_workspace(&SavedCloudWorkspace {
+            account: api.cache_key(),
+            workspace: team.id,
+        })?;
         self.cloud.local = Some(LocalView {
             requests: std::mem::take(&mut self.requests),
             request_tabs: std::mem::take(&mut self.request_tabs),
@@ -736,10 +795,15 @@ impl Workspace {
     }
 
     fn leave_team(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
+        if self.in_team() {
+            self.save_team_cache(false, None)?;
+        }
+        if let Ok(storage) = &self.storage {
+            storage.clear_active_cloud_workspace()?;
+        }
         if !self.in_team() {
             return Ok(());
         }
-        self.save_team_cache(false, None)?;
         let local = self
             .cloud
             .local

@@ -124,6 +124,12 @@ pub struct Storage {
     lock: Arc<File>,
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct SavedCloudWorkspace {
+    pub account: String,
+    pub workspace: uuid::Uuid,
+}
+
 impl Storage {
     pub fn open() -> Result<(Self, SavedWorkspace)> {
         let project = ProjectDirs::from("com", "", "Prestman")
@@ -207,6 +213,35 @@ impl Storage {
             .join("cloud")
             .join(account)
             .join(format!("{workspace}.json"))
+    }
+
+    pub(crate) fn load_active_cloud_workspace(&self) -> Result<Option<SavedCloudWorkspace>> {
+        let file = match File::open(self.directory.join("active-cloud-workspace.json")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).context("Could not open the saved workspace selection");
+            }
+        };
+        serde_json::from_reader(BufReader::new(file))
+            .map(Some)
+            .context("Could not read the saved workspace selection")
+    }
+
+    pub(crate) fn save_active_cloud_workspace(
+        &self,
+        workspace: &SavedCloudWorkspace,
+    ) -> Result<()> {
+        self.write_json("active-cloud-workspace.json", workspace)
+            .context("Could not save the selected cloud workspace")
+    }
+
+    pub(crate) fn clear_active_cloud_workspace(&self) -> Result<()> {
+        match fs::remove_file(self.directory.join("active-cloud-workspace.json")) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("Could not clear the selected cloud workspace"),
+        }
     }
 
     pub(crate) fn load_cloud_server(&self) -> Result<Option<CloudServer>> {
@@ -319,6 +354,36 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remembers_active_cloud_workspace_across_restarts_until_returning_to_local() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (storage, _) = Storage::open_in(directory.path().into())?;
+        assert!(storage.load_active_cloud_workspace()?.is_none());
+        let account = "cloud-account";
+        let workspace = uuid::Uuid::new_v4();
+        storage.save_active_cloud_workspace(&SavedCloudWorkspace {
+            account: account.into(),
+            workspace: uuid::Uuid::new_v4(),
+        })?;
+        storage.save_active_cloud_workspace(&SavedCloudWorkspace {
+            account: account.into(),
+            workspace,
+        })?;
+        drop(storage);
+
+        let (storage, _) = Storage::open_in(directory.path().into())?;
+        let saved = storage.load_active_cloud_workspace()?.unwrap();
+        assert_eq!(saved.account, account);
+        assert_eq!(saved.workspace, workspace);
+        storage.clear_active_cloud_workspace()?;
+        storage.clear_active_cloud_workspace()?;
+        drop(storage);
+
+        let (storage, _) = Storage::open_in(directory.path().into())?;
+        assert!(storage.load_active_cloud_workspace()?.is_none());
+        Ok(())
+    }
 
     #[test]
     fn saves_cloud_connection_separately_and_validates_it_on_reopen() -> Result<()> {

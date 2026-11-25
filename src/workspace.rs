@@ -488,6 +488,7 @@ impl Workspace {
         };
         workspace.restore_selection(window, cx);
         workspace.focus_url(window, cx);
+        workspace.restore_active_cloud_workspace(window, cx);
         workspace.start_update_checks(window, cx);
         workspace
     }
