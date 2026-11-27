@@ -61,24 +61,25 @@ pub struct CloudConfig {
 #[derive(Clone, Deserialize, Serialize)]
 pub struct CloudServer {
     pub url: String,
-    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 impl CloudServer {
     pub fn from_environment() -> Result<Option<Self>> {
-        let value = |runtime: &str, compiled: Option<&str>| {
-            std::env::var(runtime)
-                .ok()
-                .or_else(|| compiled.map(str::to_owned))
-        };
-        let url = value("PRESTMAN_CLOUD_URL", option_env!("PRESTMAN_CLOUD_URL"));
-        let key = value("PRESTMAN_CLOUD_KEY", option_env!("PRESTMAN_CLOUD_KEY"));
-        match (url, key) {
-            (None, None) => Ok(None),
-            (Some(url), Some(key)) => Self::parse(&url, &key).map(Some),
-            _ => bail!(
-                "Set both PRESTMAN_CLOUD_URL and PRESTMAN_CLOUD_KEY, or enter a server below."
-            ),
+        let runtime_url = std::env::var("PRESTMAN_CLOUD_URL").ok();
+        let runtime_key = std::env::var("PRESTMAN_CLOUD_KEY").ok();
+        let compiled_url = option_env!("PRESTMAN_CLOUD_URL");
+        let url = runtime_url.as_deref().or(compiled_url);
+        // A runtime URL override can point to another server. Keep its key separate.
+        let key = runtime_key
+            .as_deref()
+            .or(option_env!("PRESTMAN_CLOUD_KEY").filter(|_| url == compiled_url))
+            .unwrap_or_default();
+        match url {
+            Some(url) => Self::parse(url, key).map(Some),
+            None if key.trim().is_empty() => Ok(None),
+            None => bail!("Set PRESTMAN_CLOUD_URL, or enter a server below."),
         }
     }
 
@@ -96,12 +97,12 @@ impl CloudServer {
         );
         let key = key.trim();
         ensure!(
-            is_publishable_key(key),
+            key.is_empty() || is_publishable_key(key),
             "Enter the server's public API key (publishable or anon)."
         );
         Ok(Self {
             url: url.origin().ascii_serialization(),
-            key: key.into(),
+            key: (!key.is_empty()).then(|| key.to_owned()),
         })
     }
 }
@@ -133,9 +134,11 @@ impl CloudConfig {
         let mut request = self
             .http
             .post(format!("{}{path}", self.server.url))
-            .header("apikey", &self.server.key)
             .header("content-type", "application/json")
             .body(serde_json::to_vec(body)?);
+        if let Some(key) = &self.server.key {
+            request = request.header("apikey", key);
+        }
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }

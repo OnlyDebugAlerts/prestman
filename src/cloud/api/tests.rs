@@ -1,5 +1,7 @@
 use super::*;
 use crate::storage::Storage;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 
 fn auth_response(account: Uuid, refresh_token: &str) -> AuthResponse {
     AuthResponse {
@@ -8,6 +10,53 @@ fn auth_response(account: Uuid, refresh_token: &str) -> AuthResponse {
         expires_in: 3600,
         user: AuthUser { id: account },
     }
+}
+
+#[test]
+fn cloud_requests_send_the_public_key_only_when_configured() -> Result<()> {
+    for key in ["", "sb_publishable_test"] {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let origin = format!("http://{}", listener.local_addr()?);
+        let config = CloudConfig::new(CloudServer::parse(&origin, key)?)?;
+        let server = std::thread::spawn(move || -> Result<Vec<String>> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut reader = BufReader::new(&mut stream);
+            let mut headers = Vec::new();
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+                    break;
+                }
+                let line = line.trim_end().to_ascii_lowercase();
+                if let Some(length) = line.strip_prefix("content-length:") {
+                    content_length = length.trim().parse()?;
+                }
+                headers.push(line);
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body)?;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+            Ok(headers)
+        });
+        let response = config.post(
+            "/rest/v1/rpc/prestman_workspaces",
+            Some("session-token"),
+            &json!({}),
+        )?;
+        assert!(response.status().is_success());
+        let headers = server.join().expect("test server did not panic")?;
+        assert!(headers.contains(&"authorization: bearer session-token".into()));
+        assert_eq!(
+            headers
+                .iter()
+                .find_map(|header| header.strip_prefix("apikey: ")),
+            (!key.is_empty()).then_some(key),
+        );
+    }
+    Ok(())
 }
 
 #[test]

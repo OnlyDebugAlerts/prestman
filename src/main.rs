@@ -2,7 +2,6 @@
 
 mod app_assets;
 mod cloud;
-mod collection_io;
 mod curl_import;
 #[cfg(target_os = "macos")]
 mod desktop_icon;

@@ -41,7 +41,6 @@ def initialize(env_file, port, domain=None):
         "AUTH_DB_PASSWORD": secrets.token_hex(32),
         "REST_DB_PASSWORD": secrets.token_hex(32),
         "JWT_SECRET": secret,
-        "ANON_KEY": signed_key(secret, "anon", 5 * 365 * 86400),
     }
     if domain:
         config["PRESTMAN_DOMAIN"] = domain
@@ -108,7 +107,6 @@ def client_origin(config):
 
 def print_client_info(config):
     print(f"Server URL: {client_origin(config)}")
-    print(f"Public API key: {config['ANON_KEY']}")
 
 
 def create_user(env_file, email, password, project=None):
@@ -143,8 +141,8 @@ def main():
     up_parser.add_argument("--domain", help="Public DNS name for automatic HTTPS")
     subcommands.add_parser("status", help="Show the status of the server containers")
     subcommands.add_parser("down", help="Stop the server and keep its data")
-    subcommands.add_parser("client-info", help="Print the URL and public API key for the app")
-    subcommands.add_parser("client-env", help="Print only the URL and the public client key")
+    subcommands.add_parser("client-info", help="Print the server URL for the app")
+    subcommands.add_parser("client-env", help="Print the server URL as an environment variable")
     user_parser = subcommands.add_parser("create-user", help="Create a confirmed local account")
     user_parser.add_argument("email")
 
@@ -170,7 +168,6 @@ def main():
                 print_client_info(config)
             else:
                 print(f"export PRESTMAN_CLOUD_URL={shlex.quote(client_origin(config))}")
-                print(f"export PRESTMAN_CLOUD_KEY={shlex.quote(config['ANON_KEY'])}")
         elif args.command == "create-user":
             password = getpass.getpass("Initial password: ")
             if len(password) < 12 or len(password.encode()) > 72:

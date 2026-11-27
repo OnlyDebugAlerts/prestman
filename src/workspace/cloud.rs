@@ -24,6 +24,7 @@ pub(super) struct CloudState {
     panel: Option<Panel>,
     teams: Vec<Team>,
     teams_loaded: bool,
+    request_views: HashMap<Uuid, HashMap<Uuid, RequestView>>,
     mounted: Option<Mounted>,
     local: Option<LocalView>,
     pub(super) rename_version: Option<ItemRevision>,
@@ -59,6 +60,14 @@ enum WorkspaceForm {
     Join,
 }
 
+enum CloudPage {
+    Directory,
+    ManageTeam,
+    Publish(usize),
+    Restore(SavedCloudWorkspace),
+    Open(Team),
+}
+
 impl Panel {
     fn is_busy(&self) -> bool {
         self.job.is_some()
@@ -79,6 +88,7 @@ enum PanelJob {
 struct ServerEditor {
     url: Entity<InputState>,
     key: Entity<InputState>,
+    show_key: bool,
 }
 
 impl ServerEditor {
@@ -88,13 +98,18 @@ impl ServerEditor {
                 .placeholder("https://cloud.example.com")
                 .default_value(server.map_or("", |server| server.url.as_str()).to_owned())
         });
+        let existing_key = server.and_then(|server| server.key.as_deref());
         let key = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Publishable or anon key")
-                .default_value(server.map_or("", |server| server.key.as_str()).to_owned())
+                .default_value(existing_key.unwrap_or_default().to_owned())
         });
         url.read(cx).focus_handle(cx).focus(window, cx);
-        Self { url, key }
+        Self {
+            url,
+            key,
+            show_key: existing_key.is_some(),
+        }
     }
 }
 
@@ -122,6 +137,7 @@ struct Mounted {
     group_ids: HashMap<usize, Uuid>,
     request_ids: HashMap<usize, Uuid>,
     sync_error: Option<String>,
+    unreachable: bool,
     syncing: bool,
     compare: Option<Uuid>,
 }
@@ -160,7 +176,31 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_cloud(publish_root, None, window, cx);
+        let page = match publish_root {
+            Some(root) => CloudPage::Publish(root),
+            None if self.in_team() => CloudPage::ManageTeam,
+            None => CloudPage::Directory,
+        };
+        if publish_root.is_none() && self.cloud_is_open() {
+            self.close_cloud(window, cx);
+        } else {
+            self.show_cloud(page, window, cx);
+        }
+    }
+
+    fn cloud_switch_team(&mut self, team: Team, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .cloud
+            .mounted
+            .as_ref()
+            .is_some_and(|mounted| mounted.team.id == team.id)
+        {
+            if self.cloud_is_open() {
+                self.close_cloud(window, cx);
+            }
+        } else {
+            self.show_cloud(CloudPage::Open(team), window, cx);
+        }
     }
 
     pub(super) fn restore_active_cloud_workspace(
@@ -172,19 +212,13 @@ impl Workspace {
             return;
         };
         match storage.load_active_cloud_workspace() {
-            Ok(Some(workspace)) => self.show_cloud(None, Some(workspace), window, cx),
+            Ok(Some(workspace)) => self.show_cloud(CloudPage::Restore(workspace), window, cx),
             Ok(None) => {}
             Err(error) => self.save_error = Some(format!("{error:#}")),
         }
     }
 
-    fn show_cloud(
-        &mut self,
-        publish_root: Option<usize>,
-        restore_workspace: Option<SavedCloudWorkspace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn show_cloud(&mut self, page: CloudPage, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .cloud
             .panel
@@ -195,10 +229,14 @@ impl Workspace {
         }
         if self.cloud.panel.is_some() {
             self.close_cloud(window, cx);
-            if publish_root.is_none() {
-                return;
-            }
         }
+        let browsing_workspaces = !matches!(&page, CloudPage::ManageTeam);
+        let (publication, restore_workspace, open_team) = match page {
+            CloudPage::Publish(root) => (self.prepare_publication(root), None, None),
+            CloudPage::Restore(workspace) => (None, Some(workspace), None),
+            CloudPage::Open(team) => (None, None, Some(team)),
+            CloudPage::Directory | CloudPage::ManageTeam => (None, None, None),
+        };
         let input = |placeholder, cx: &mut Context<Self>, window: &mut Window| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
         };
@@ -212,7 +250,6 @@ impl Workspace {
         } else {
             (None, None)
         };
-        let publication = publish_root.and_then(|root| self.prepare_publication(root));
         let server_editor = (self.cloud.api.is_none() && server.is_none())
             .then(|| ServerEditor::new(None, window, cx));
         self.cloud.panel = Some(Panel {
@@ -226,7 +263,7 @@ impl Workspace {
             invite_email: input("teammate@example.com", cx, window),
             focus: cx.focus_handle(),
             signup: false,
-            browsing_workspaces: self.cloud.mounted.is_none() || publication.is_some(),
+            browsing_workspaces,
             workspace_form: None,
             invite_role: Role::Editor,
             invite_copied: false,
@@ -244,7 +281,11 @@ impl Workspace {
             if let Some(panel) = &self.cloud.panel {
                 panel.focus.focus(window, cx);
             }
-            self.cloud_refresh(window, cx);
+            if let Some(team) = open_team {
+                self.cloud_open_team(team, window, cx);
+            } else {
+                self.cloud_refresh(window, cx);
+            }
         } else {
             self.restore_cloud_session(window, cx);
             if let Some(panel) = &self.cloud.panel {
@@ -364,6 +405,7 @@ impl Workspace {
                         view.cloud.api = None;
                         view.cloud.teams.clear();
                         view.cloud.teams_loaded = false;
+                        view.cloud.request_views.clear();
                         view.cloud.panel = None;
                         view.open_cloud(None, window, cx);
                     }
@@ -764,6 +806,7 @@ impl Workspace {
             account: api.cache_key(),
             workspace: team.id,
         })?;
+        self.remember_request_view();
         self.cloud.local = Some(LocalView {
             requests: std::mem::take(&mut self.requests),
             request_tabs: std::mem::take(&mut self.request_tabs),
@@ -784,6 +827,7 @@ impl Workspace {
             group_ids: HashMap::new(),
             request_ids: HashMap::new(),
             sync_error: None,
+            unreachable: false,
             syncing: false,
             compare: None,
         });
@@ -797,6 +841,21 @@ impl Workspace {
     fn leave_team(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
         if self.in_team() {
             self.save_team_cache(false, None)?;
+            self.remember_request_view();
+        }
+        if let Some(mounted) = &self.cloud.mounted {
+            self.cloud.request_views.insert(
+                mounted.team.id,
+                self.requests
+                    .iter()
+                    .filter_map(|entry| {
+                        mounted
+                            .request_ids
+                            .get(&entry.id)
+                            .map(|&key| (key, entry.view))
+                    })
+                    .collect(),
+            );
         }
         if let Ok(storage) = &self.storage {
             storage.clear_active_cloud_workspace()?;
@@ -818,6 +877,7 @@ impl Workspace {
         self.collapsed_collections = local.collapsed;
         self.selected = local.selected;
         self.reset_team_view();
+        self.restore_request_view();
         self.restore_selection(window, cx);
         Ok(())
     }
@@ -829,6 +889,8 @@ impl Workspace {
         self.request_rename = None;
         self.request_pane = RequestPane::Body;
         self.response_pane = Pane::Body;
+        self.compact_pane = CompactPane::Request;
+        self.compact_sidebar_open = false;
         self.visualizer_document = None;
     }
 
@@ -951,15 +1013,33 @@ impl Workspace {
         Ok(())
     }
 
+    pub(super) fn viewer_draft_saved(&self, entry: &Entry) -> bool {
+        let Some(mounted) = self
+            .cloud
+            .mounted
+            .as_ref()
+            .filter(|team| !team.team.role.can_edit())
+        else {
+            return false;
+        };
+        mounted
+            .request_ids
+            .get(&entry.id)
+            .and_then(|id| mounted.cache.drafts.get(id))
+            .is_some_and(|draft| draft.request == entry.draft)
+    }
+
     fn refresh_team_projection(
         &mut self,
         restore_sidebar: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.remember_request_view();
         let Some(mounted) = self.cloud.mounted.as_mut() else {
             return;
         };
+        let request_views = self.cloud.request_views.get(&mounted.team.id);
         let working = mounted.cache.working();
         let group_ids = &mut mounted.group_ids;
         let mut group_by_key: HashMap<_, _> =
@@ -1052,7 +1132,11 @@ impl Workspace {
                     entry.saved = saved;
                     entry
                 } else {
-                    Entry::new(id, parent, draft, saved)
+                    let mut entry = Entry::new(id, parent, draft, saved);
+                    if let Some(view) = request_views.and_then(|views| views.get(&key)) {
+                        entry.view = *view;
+                    }
+                    entry
                 }
             })
             .collect();
@@ -1104,6 +1188,7 @@ impl Workspace {
                 .is_none_or(|(id, draft)| self.active().id != *id || &self.active().draft != draft)
         {
             self.request_rename = None;
+            self.restore_request_view();
             self.restore_selection(window, cx);
         }
     }
@@ -1182,6 +1267,9 @@ impl Workspace {
         mounted.syncing = false;
         if let Err(error) = &result {
             mounted.sync_error = Some(format!("{error:#}"));
+            mounted.unreachable = error
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|error| error.is_connect() || error.is_timeout());
             let access_revoked = if sent.is_empty() {
                 error.is::<AccessDenied>()
             } else {
@@ -1192,6 +1280,7 @@ impl Workspace {
                 match self.leave_team(window, cx) {
                     Ok(()) => {
                         self.cloud.teams.retain(|team| team.id != id);
+                        self.cloud.request_views.remove(&id);
                         self.cloud.panel = None;
                         self.save_error =
                             Some("Your access to this team workspace was removed.".into());
@@ -1200,6 +1289,7 @@ impl Workspace {
                         let mounted = self.cloud.mounted.as_mut().unwrap();
                         mounted.team.role = Role::Viewer;
                         mounted.sync_error = Some(format!("{error:#} {cache_error:#}"));
+                        mounted.unreachable = false;
                     }
                 }
                 cx.notify();
@@ -1216,6 +1306,7 @@ impl Workspace {
             }
         };
         let changed = result.tree.is_some() || !sent.is_empty();
+        mounted.unreachable = false;
         mounted.team.role = result.role;
         if !changed {
             if !write_failed || !mounted.team.role.can_edit() {
@@ -1284,6 +1375,9 @@ impl Workspace {
 
 impl Workspace {
     fn cloud_return_local(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.in_team() && !self.cloud_is_open() {
+            return;
+        }
         match self.leave_team(window, cx) {
             Ok(()) => self.close_cloud(window, cx),
             Err(error) => {
@@ -1291,6 +1385,7 @@ impl Workspace {
                     panel.error = Some(format!("{error:#}"));
                 } else if let Some(mounted) = &mut self.cloud.mounted {
                     mounted.sync_error = Some(format!("{error:#}"));
+                    mounted.unreachable = false;
                 }
                 cx.notify();
             }
@@ -1330,9 +1425,11 @@ impl Workspace {
             return;
         };
         if !mounted.cache.conflicts().contains(&id) {
+            mounted.compare = None;
+            self.sync_visualizer(window, cx);
+            cx.notify();
             return;
         }
-        mounted.compare = None;
         let mut next = mounted.cache.clone();
         let change = next.pending.remove(&id);
         let draft = next.drafts.remove(&id);
@@ -1369,7 +1466,9 @@ impl Workspace {
         }
         match next.save(&mounted.path) {
             Ok(()) => {
+                mounted.compare = None;
                 mounted.cache = next;
+                self.save_error = None;
                 self.refresh_team_projection(false, window, cx);
             }
             Err(error) => self.save_error = Some(format!("{error:#}")),

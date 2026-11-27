@@ -66,6 +66,20 @@ enum Pane {
     Console,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CompactPane {
+    #[default]
+    Request,
+    Response,
+}
+
+#[derive(Clone, Copy)]
+struct RequestView {
+    request: RequestPane,
+    response: Pane,
+    compact: CompactPane,
+}
+
 fn wrap_json_response(text: &str) -> bool {
     const MAX_WRAPPED_BYTES: usize = 256 * 1024;
     const MAX_WRAPPED_LINE_BYTES: usize = 8 * 1024;
@@ -112,6 +126,9 @@ struct Entry {
     script_report: Report,
     grpc_state: grpc::GrpcState,
     graphql_state: graphql::GraphqlState,
+    view: RequestView,
+    query_scroll: ScrollHandle,
+    headers_scroll: ScrollHandle,
 }
 
 impl Entry {
@@ -141,6 +158,13 @@ impl Entry {
             script_report: Report::default(),
             grpc_state: grpc::GrpcState::default(),
             graphql_state: graphql::GraphqlState::default(),
+            view: RequestView {
+                request: RequestPane::Body,
+                response: Pane::Body,
+                compact: CompactPane::Request,
+            },
+            query_scroll: ScrollHandle::new(),
+            headers_scroll: ScrollHandle::new(),
         }
     }
 
@@ -202,6 +226,7 @@ pub struct Workspace {
     global_variables: Vec<Variable>,
     environment_variables: Vec<Variable>,
     variable_editor: Option<VariableEditor>,
+    variable_editor_focus: FocusHandle,
     openapi_import: Option<collection_files::OpenApiImport>,
     variable_hover: Option<variable_hover::HoverVariable>,
     next_collection_id: usize,
@@ -212,6 +237,9 @@ pub struct Workspace {
     request_tabs: Vec<usize>,
     request_tabs_scroll: ScrollHandle,
     sidebar_width: Pixels,
+    compact_sidebar_open: bool,
+    compact_pane: CompactPane,
+    last_compact_layout: bool,
     sidebar_focus: FocusHandle,
     sidebar_scroll: ScrollHandle,
     sidebar_cursor: Option<SidebarTarget>,
@@ -448,6 +476,7 @@ impl Workspace {
             global_variables: snapshot.global_variables,
             environment_variables: snapshot.environment_variables,
             variable_editor: None,
+            variable_editor_focus: cx.focus_handle(),
             openapi_import: None,
             variable_hover: None,
             next_collection_id,
@@ -458,6 +487,9 @@ impl Workspace {
             request_tabs,
             request_tabs_scroll: ScrollHandle::new(),
             sidebar_width: px(234.),
+            compact_sidebar_open: false,
+            compact_pane: CompactPane::Request,
+            last_compact_layout: Self::compact_layout(window),
             sidebar_focus,
             sidebar_scroll: ScrollHandle::new(),
             sidebar_cursor: None,
@@ -553,13 +585,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.remember_request_view();
         self.openapi_import = None;
         self.variable_editor = None;
         self.requests
             .push(Entry::new(self.next_request_id, collection_id, draft, None));
         self.next_request_id += 1;
-        self.request_pane = RequestPane::Body;
         self.selected = self.requests.len() - 1;
+        self.restore_request_view();
+        self.compact_sidebar_open = false;
         self.open_selected_tab();
         self.show_selection(window, cx);
         self.focus_url(window, cx);
@@ -567,6 +601,23 @@ impl Workspace {
 
     fn request_index(&self, id: usize) -> Option<usize> {
         self.requests.iter().position(|entry| entry.id == id)
+    }
+
+    fn remember_request_view(&mut self) {
+        if let Some(entry) = self.requests.get_mut(self.selected) {
+            entry.view = RequestView {
+                request: self.request_pane,
+                response: self.response_pane,
+                compact: self.compact_pane,
+            };
+        }
+    }
+
+    fn restore_request_view(&mut self) {
+        let view = self.active().view;
+        self.request_pane = view.request;
+        self.response_pane = view.response;
+        self.compact_pane = view.compact;
     }
 
     fn select_request(
@@ -578,6 +629,8 @@ impl Workspace {
         if !self.dismiss_cloud_panel() {
             return false;
         }
+        let from_compact_sidebar = self.compact_sidebar_open && Self::compact_layout(window);
+        self.compact_sidebar_open = false;
         self.variable_hover = None;
         self.openapi_import = None;
         self.variable_editor = None;
@@ -585,19 +638,19 @@ impl Workspace {
         if index == self.selected {
             self.open_selected_tab();
             self.sync_visualizer(window, cx);
+            if from_compact_sidebar {
+                self.focus_url(window, cx);
+            }
             return true;
         }
-        let previous = &self.active().draft;
-        let next = &self.requests[index].draft;
-        if previous.grpc.is_some() != next.grpc.is_some()
-            || previous.graphql.is_some() != next.graphql.is_some()
-        {
-            self.request_pane = RequestPane::Body;
-            self.response_pane = Pane::Body;
-        }
+        self.remember_request_view();
         self.selected = index;
+        self.restore_request_view();
         self.open_selected_tab();
         self.show_selection(window, cx);
+        if from_compact_sidebar {
+            self.focus_url(window, cx);
+        }
         true
     }
 
@@ -956,12 +1009,9 @@ impl Workspace {
         if self.in_team() {
             let result = self.save_team_cache(false, None);
             if !self.team_can_edit() || result.is_err() {
-                self.save_error = Some(match result {
-                    Ok(()) => {
-                        "Workspace is read-only. Your edits are saved as a local draft.".into()
-                    }
-                    Err(error) => format!("Could not save your draft. {error:#}"),
-                });
+                self.save_error = result
+                    .err()
+                    .map(|error| format!("Could not save your draft. {error:#}"));
                 cx.notify();
                 return;
             }

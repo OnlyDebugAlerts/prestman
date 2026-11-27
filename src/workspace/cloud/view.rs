@@ -1,78 +1,185 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    Disableable, Selectable,
+    Disableable, Selectable, Side, Sizable,
     button::{Button, ButtonVariants},
     input::{Enter, Escape, Input},
+    menu::{DropdownMenu, PopupMenuItem},
     spinner::Spinner,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 
 use super::*;
 use crate::workspace::view::{
-    ACCENT, BACKGROUND, BORDER, EDITOR, GREEN, MUTED, RED, SELECTED, SURFACE, column, icon, row,
+    ACCENT, AMBER, AMBER_BG, BACKGROUND, BORDER, EDITOR, ERROR_BG, GREEN, MUTED, RED, SELECTED,
+    SURFACE, VIOLET, VIOLET_BG, column, icon, row, status_badge,
 };
 
+const CLOUD_PAGE_WIDTH: Pixels = px(1088.);
+
 impl Workspace {
-    pub(in crate::workspace) fn team_sidebar_controls(&self, cx: &Context<Self>) -> Option<Div> {
-        let mounted = self.cloud.mounted.as_ref()?;
-        Some(
-            row()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(mounted.team.name.clone()),
-                )
-                .child(
-                    Button::new("cloud-local")
-                        .ghost()
-                        .compact()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .label("Back to local")
-                        .disabled(self.cloud.panel.as_ref().is_some_and(Panel::is_busy))
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.cloud_return_local(window, cx);
-                        })),
-                ),
-        )
+    pub(in crate::workspace) fn workspace_switcher(&self, cx: &Context<Self>) -> impl IntoElement {
+        let workspace = cx.weak_entity();
+        let current = self.cloud.mounted.as_ref().map(|mounted| &mounted.team);
+        let current_id = current.map(|team| team.id);
+        let current_name = current.map_or("Local workspace", |team| team.name.as_str());
+        let signed_in = self.cloud.api.is_some();
+        let mut teams = self.cloud.teams.clone();
+        if let Some(current) = current
+            && let Some(team) = teams.iter_mut().find(|team| team.id == current.id)
+        {
+            team.role = current.role;
+        }
+        teams.sort_by_cached_key(|team| team.name.to_lowercase());
+        let storage_unavailable = self.storage.is_err();
+        Button::new("workspace-switcher")
+            .outline()
+            .small()
+            .compact()
+            .icon(IconName::PanelTop)
+            .dropdown_caret(true)
+            .accessibility_label(format!("Switch workspace, current: {current_name}"))
+            .tooltip("Switch workspace")
+            .disabled(self.cloud.panel.as_ref().is_some_and(Panel::is_busy))
+            .child(
+                div()
+                    .max_w(px(140.))
+                    .truncate()
+                    .child(current_name.to_owned()),
+            )
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu
+                    .min_w(px(272.))
+                    .max_w(px(370.))
+                    .max_h(px(384.))
+                    .scrollable(true)
+                    .check_side(Side::Right)
+                    .label("On this device")
+                    .item(
+                        workspace_menu_item(
+                            "Local workspace",
+                            IconName::Monitor,
+                            &workspace,
+                            Workspace::cloud_return_local,
+                        )
+                        .checked(current_id.is_none()),
+                    );
+                if signed_in && !teams.is_empty() {
+                    menu = menu.separator().label("Team");
+                    for team in &teams {
+                        let selected = current_id == Some(team.id);
+                        let label = format!("{}  ·  {}", team.name, team.role.label());
+                        let team = team.clone();
+                        menu = menu.item(
+                            workspace_menu_item(
+                                label,
+                                IconName::Users,
+                                &workspace,
+                                move |view, window, cx| {
+                                    view.cloud_switch_team(team.clone(), window, cx)
+                                },
+                            )
+                            .checked(selected)
+                            .disabled(storage_unavailable && !selected),
+                        );
+                    }
+                }
+                menu.separator().item(workspace_menu_item(
+                    if signed_in {
+                        "Manage workspaces"
+                    } else {
+                        "Connect to Cloud"
+                    },
+                    IconName::Cloud,
+                    &workspace,
+                    |view, window, cx| view.show_cloud(CloudPage::Directory, window, cx),
+                ))
+            })
     }
 
     pub(in crate::workspace) fn team_status(&self, cx: &Context<Self>) -> Option<Div> {
         let mounted = self.cloud.mounted.as_ref()?;
+        let generation = mounted.generation;
         let conflicts = mounted.cache.conflicts();
-        let status = if let Some(error) = &mounted.sync_error {
-            error.clone()
+        let pending = mounted.cache.pending.len();
+        let queued_detail = format!(
+            "{pending} {} saved on this device.",
+            if pending == 1 { "change" } else { "changes" },
+        );
+        let (title, detail, foreground, background) = if mounted.unreachable {
+            (
+                "Offline",
+                if pending > 0 {
+                    format!("{queued_detail} Sync resumes when the server is reachable.")
+                } else {
+                    "Sync resumes when the server is reachable.".into()
+                },
+                AMBER,
+                AMBER_BG,
+            )
         } else if !conflicts.is_empty() {
-            "Resolve conflicts to sync changes".into()
-        } else if !mounted.cache.pending.is_empty() && !mounted.team.role.can_edit() {
-            "Workspace is read-only · unpublished changes saved on this device".into()
-        } else if !mounted.cache.pending.is_empty() {
-            "Changes saved on this device · syncing".into()
+            (
+                "Resolve conflicts to sync changes",
+                "Compare the changes below before replacing or copying a version.".into(),
+                RED,
+                ERROR_BG,
+            )
+        } else if let Some(error) = &mounted.sync_error {
+            ("Sync unavailable", error.clone(), RED, ERROR_BG)
+        } else if !mounted.team.role.can_edit() {
+            (
+                "Read-only access",
+                "Run shared requests and save your changes as local drafts.".into(),
+                VIOLET,
+                VIOLET_BG,
+            )
+        } else if pending > 0 {
+            ("Syncing", queued_detail, AMBER, AMBER_BG)
         } else {
-            return None;
+            ("Synced", String::new(), GREEN, SELECTED)
         };
         Some(
             column()
-                .px_3()
-                .py_1()
-                .border_b_1()
+                .mx_3()
+                .mt_2()
+                .mb_1()
+                .p_2()
+                .gap_1()
+                .min_w_0()
+                .rounded_md()
+                .border_1()
                 .border_color(rgb(BORDER))
                 .text_xs()
+                .bg(rgb(SURFACE))
                 .child(
-                    div()
-                        .text_color(rgb(if mounted.sync_error.is_some() {
-                            RED
-                        } else {
-                            MUTED
-                        }))
-                        .child(status),
+                    row()
+                        .gap_2()
+                        .min_w_0()
+                        .child(role_badge(mounted.team.role))
+                        .child(status_badge(title, foreground, background))
+                        .when(!detail.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_color(rgb(MUTED))
+                                    .child(detail),
+                            )
+                        })
+                        .when(
+                            mounted.sync_error.is_some() && conflicts.is_empty(),
+                            |row| {
+                                row.child(
+                                    Button::new("retry-workspace-sync")
+                                        .ghost()
+                                        .compact()
+                                        .label("Retry sync")
+                                        .disabled(mounted.syncing)
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            view.sync_team(generation, window, cx);
+                                        })),
+                                )
+                            },
+                        ),
                 )
                 .children(conflicts.into_iter().map(|id| {
                     let content = mounted
@@ -88,6 +195,7 @@ impl Workspace {
                         && matches!(content, Some(Content::Request { .. }));
                     row()
                         .gap_2()
+                        .flex_wrap()
                         .child(
                             div()
                                 .flex_1()
@@ -98,7 +206,7 @@ impl Workspace {
                             Button::new(SharedString::from(format!("cloud-compare-{id}")))
                                 .ghost()
                                 .compact()
-                                .label("Compare")
+                                .label("Compare changes")
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.set_cloud_comparison(Some(id), window, cx);
                                 })),
@@ -136,6 +244,9 @@ impl Workspace {
             .pending
             .get(&id)
             .and_then(|change| change.content.as_ref());
+        let name = local.or(remote).map_or("Workspace item", Content::name);
+        let can_copy =
+            mounted.team.role.can_edit() && matches!(local, Some(Content::Request { .. }));
         let card = |label, content: Option<&Content>| {
             let text = content
                 .and_then(|content| serde_json::to_string_pretty(content).ok())
@@ -162,18 +273,54 @@ impl Workspace {
                 .child(
                     row()
                         .gap_2()
-                        .px_3()
-                        .py_2()
-                        .child(div().flex_1().child("Compare conflicting changes"))
+                        .px_4()
+                        .py_3()
+                        .flex_wrap()
+                        .border_b_1()
+                        .border_color(rgb(BORDER))
+                        .child(
+                            column()
+                                .gap_1()
+                                .flex_1()
+                                .min_w_0()
+                                .child(heading("Conflicting change"))
+                                .child(muted(name.to_owned())),
+                        )
                         .child(
                             Button::new("close-cloud-comparison")
                                 .ghost()
-                                .label("Close")
+                                .label("Cancel")
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.set_cloud_comparison(None, window, cx)
                                 })),
-                        ),
+                        )
+                        .child(
+                            Button::new("compare-use-cloud-version")
+                                .outline()
+                                .label("Use cloud version")
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.resolve_cloud_conflict(id, false, window, cx);
+                                })),
+                        )
+                        .when(can_copy, |row| {
+                            row.child(
+                                Button::new("compare-save-as-copy")
+                                    .primary()
+                                    .label("Save as copy")
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.resolve_cloud_conflict(id, true, window, cx);
+                                    })),
+                            )
+                        }),
                 )
+                .children(self.save_error.as_ref().map(|error| {
+                    div().mx_4().mt_2().child(notice(
+                        IconName::CircleAlert,
+                        RED,
+                        ERROR_BG,
+                        error.clone(),
+                    ))
+                }))
                 .child(
                     row()
                         .id("cloud-compare-scroll")
@@ -183,7 +330,7 @@ impl Workspace {
                         .overflow_y_scroll()
                         .gap_3()
                         .p_3()
-                        .child(card("Your unpublished version", local))
+                        .child(card("On this device", local))
                         .child(card("Cloud version", remote)),
                 ),
         )
@@ -212,11 +359,21 @@ impl Workspace {
 
         let header = row()
             .w_full()
-            .max_w(px(880.))
+            .max_w(CLOUD_PAGE_WIDTH)
             .min_h(px(58.))
             .gap_3()
-            .child(symbol(IconName::Cloud))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Cloud"))
+            .child(symbol(if team_page.is_some() {
+                IconName::Users
+            } else {
+                IconName::Layers
+            }))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(if auth_page {
+                "Cloud connection"
+            } else if team_page.is_some() {
+                "Team access"
+            } else {
+                "Workspace directory"
+            }))
             .when(team_page.is_some(), |header| {
                 header.child(
                     Button::new("cloud-all-workspaces")
@@ -261,8 +418,8 @@ impl Workspace {
                     .ghost()
                     .compact()
                     .icon(IconName::Close)
-                    .tooltip("Close Cloud (Esc)")
-                    .accessibility_label("Close Cloud")
+                    .tooltip("Back to requests (Esc)")
+                    .accessibility_label("Back to requests")
                     .disabled(!panel.can_close())
                     .on_click(cx.listener(|view, _, window, cx| view.close_cloud(window, cx))),
             );
@@ -294,7 +451,7 @@ impl Workspace {
                         .justify_center()
                         .flex_shrink_0()
                         .px_5()
-                        .bg(rgb(EDITOR))
+                        .bg(rgb(SURFACE))
                         .border_b_1()
                         .border_color(rgb(BORDER))
                         .child(header),
@@ -306,19 +463,23 @@ impl Workspace {
                         .min_h_0()
                         .overflow_y_scroll()
                         .items_center()
-                        .px_5()
-                        .py_6()
+                        .px_4()
+                        .py_4()
                         .child(
                             column()
                                 .w_full()
-                                .max_w(px(if auth_page { 440. } else { 880. }))
+                                .max_w(if auth_page {
+                                    px(420.)
+                                } else {
+                                    CLOUD_PAGE_WIDTH
+                                })
                                 .flex_shrink_0()
                                 .gap_4()
                                 .children(panel.error.as_ref().map(|message| {
-                                    notice(IconName::CircleAlert, RED, 0x341f2c, message.clone())
+                                    notice(IconName::CircleAlert, RED, ERROR_BG, message.clone())
                                 }))
                                 .children(panel.message.as_ref().map(|message| {
-                                    notice(IconName::CircleCheck, GREEN, 0x182b28, message.clone())
+                                    notice(IconName::CircleCheck, GREEN, SELECTED, message.clone())
                                 }))
                                 .child(content),
                         ),
@@ -330,7 +491,7 @@ impl Workspace {
         card()
             .child(page_intro(
                 "Connect to Cloud",
-                "Use the server URL and public API key from your administrator.",
+                "Connect to your team's server to open shared collections and requests.",
             ))
             .child(
                 column()
@@ -340,7 +501,37 @@ impl Workspace {
                         view.cloud_save_server(window, cx);
                     }))
                     .child(field("Server URL", &editor.url, false))
-                    .child(field("Public API key", &editor.key, false)),
+                    .when_else(
+                        editor.show_key,
+                        |form| form.child(field("Public API key", &editor.key, false)),
+                        |form| {
+                            form.child(
+                                row().child(
+                                    Button::new("cloud-show-server-key")
+                                        .ghost()
+                                        .compact()
+                                        .label("Add public API key")
+                                        .tooltip("For managed Supabase and older Prestman servers")
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            if let Some(editor) = view
+                                                .cloud
+                                                .panel
+                                                .as_mut()
+                                                .and_then(|panel| panel.server_editor.as_mut())
+                                            {
+                                                editor.show_key = true;
+                                                editor
+                                                    .key
+                                                    .read(cx)
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                                cx.notify();
+                                            }
+                                        })),
+                                ),
+                            )
+                        },
+                    ),
             )
             .child(
                 row()
@@ -374,7 +565,7 @@ impl Workspace {
         card()
             .child(page_intro(
                 action,
-                "Access your shared workspaces in Prestman Cloud.",
+                "Access the workspaces you belong to on this server.",
             ))
             .child(
                 column()
@@ -487,7 +678,7 @@ impl Workspace {
                         if publishing {
                             "Select a workspace where you can edit requests."
                         } else {
-                            "Collections and requests shared with your teams."
+                            "Each workspace keeps its own collections and open requests."
                         },
                     ))
                     .child(
@@ -539,6 +730,34 @@ impl Workspace {
                     .workspace_form
                     .map(|form| self.cloud_workspace_form_view(panel, form, cx)),
             )
+            .when(!publishing, |page| {
+                page.child(section_heading("Local"))
+                    .child(
+                        list_card().child(
+                            list_row(0)
+                                .child(symbol(IconName::Monitor))
+                                .child(workspace_identity(
+                                    "Local workspace",
+                                    "Collections and drafts on this device",
+                                ))
+                                .when(current.is_none(), |row| {
+                                    row.child(status_badge("Current", GREEN, SELECTED))
+                                })
+                                .child(
+                                    Button::new("cloud-open-local")
+                                        .outline()
+                                        .compact()
+                                        .label("Open")
+                                        .accessibility_label("Open local workspace")
+                                        .disabled(busy)
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.cloud_return_local(window, cx)
+                                        })),
+                                ),
+                        ),
+                    )
+                    .child(section_heading("Team"))
+            })
             .child(if count == 0 {
                 let (title, help) = if matches!(panel.job, Some(PanelJob::Refresh)) {
                     ("Loading workspaces", "")
@@ -572,21 +791,29 @@ impl Workspace {
                         "Open"
                     };
                     list_row(index)
-                        .child(symbol(IconName::Folder))
-                        .child(
-                            column()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(team.name.clone()),
-                                )
-                                .when(is_current, |name| name.child(muted("Current workspace"))),
+                        .child(symbol(IconName::Users))
+                        .child(workspace_identity(
+                            team.name.clone(),
+                            if team.role.can_edit() {
+                                "Shared collections and requests"
+                            } else {
+                                "Browse and run shared requests"
+                            },
+                        ))
+                        .child(role_badge(
+                            self.cloud
+                                .mounted
+                                .as_ref()
+                                .filter(|mounted| mounted.team.id == team.id)
+                                .map_or(team.role, |mounted| mounted.team.role),
+                        ))
+                        .children(
+                            self.cloud
+                                .mounted
+                                .as_ref()
+                                .filter(|mounted| mounted.team.id == team.id && !publishing)
+                                .map(directory_status),
                         )
-                        .child(role_badge(team.role))
                         .child(
                             Button::new(SharedString::from(format!("cloud-team-{}", team.id)))
                                 .outline()
@@ -707,43 +934,47 @@ impl Workspace {
         let owner = mounted.team.role == Role::Owner;
         let open_team = mounted.team.clone();
         let mut content = column().gap_4().child(
-            card().child(
-                row()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(symbol(IconName::FolderOpen))
-                    .child(
-                        column()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_size(px(23.))
-                                    .child(mounted.team.name.clone()),
-                            )
-                            .child(muted(if mounted.team.role.can_edit() {
-                                "Team workspace"
-                            } else {
-                                "Read-only access"
-                            })),
-                    )
-                    .child(role_badge(mounted.team.role))
-                    .child(
-                        Button::new("cloud-resume-workspace")
-                            .primary()
-                            .label("Open workspace")
-                            .disabled(busy)
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.cloud_open_team(open_team.clone(), window, cx)
-                            })),
-                    ),
-            ),
+            row()
+                .flex_wrap()
+                .gap_3()
+                .child(symbol(IconName::Users))
+                .child(
+                    column()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            div()
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(26.))
+                                .child(mounted.team.name.clone()),
+                        )
+                        .child(muted(match mounted.team.role {
+                            Role::Owner => "Manage who can access this workspace.",
+                            Role::Editor => "Edit and run shared requests in this workspace.",
+                            Role::Viewer => {
+                                "Run shared requests and save your changes as local drafts."
+                            }
+                        })),
+                )
+                .child(role_badge(mounted.team.role))
+                .child(
+                    Button::new("cloud-resume-workspace")
+                        .primary()
+                        .label("Open workspace")
+                        .disabled(busy)
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.cloud_open_team(open_team.clone(), window, cx)
+                        })),
+                ),
         );
         if owner {
-            content =
-                content
+            let members =
+                column()
+                    .flex_1()
+                    .min_w(px(448.))
+                    .gap_3()
                     .child(
                         row()
                             .gap_2()
@@ -774,8 +1005,15 @@ impl Workspace {
                                 self.cloud_member_row(panel, member, index, cx)
                             }),
                         )
-                    })
-                    .child(self.cloud_invite_card(panel, cx));
+                    });
+            content = content.child(
+                row()
+                    .gap_4()
+                    .flex_wrap()
+                    .items_start()
+                    .child(members)
+                    .child(self.cloud_invite_card(panel, cx).flex_1().min_w(px(300.))),
+            );
         }
         content
     }
@@ -874,37 +1112,159 @@ impl Workspace {
             }))
         };
         card()
-            .child(row().gap_3().child(symbol(IconName::UserPlus)).child(heading("Invite a teammate")))
             .child(
-                div().capture_action(cx.listener(move |view, _: &Enter, window, cx| {
-                    cx.stop_propagation();
-                    view.cloud_invite(role, window, cx);
-                })).child(field("Teammate’s email", &panel.invite_email, busy)),
+                row()
+                    .gap_3()
+                    .child(symbol(IconName::UserPlus))
+                    .child(heading("Invite a teammate")),
+            )
+            .child(muted("Your teammate must join with this email address."))
+            .child(
+                div()
+                    .capture_action(cx.listener(move |view, _: &Enter, window, cx| {
+                        cx.stop_propagation();
+                        view.cloud_invite(role, window, cx);
+                    }))
+                    .child(field("Teammate’s email", &panel.invite_email, busy)),
             )
             .child(
-                row().gap_3().flex_wrap().justify_between()
-                    .child(column().gap_2()
-                        .child(row().gap_2().child(role_option("cloud-role-editor", Role::Editor)).child(role_option("cloud-role-viewer", Role::Viewer)))
-                        .child(muted(if role == Role::Editor { "Can edit shared requests." } else { "Can view and run shared requests." })))
-                    .child(Button::new("cloud-create-invite").primary().label("Create invitation").disabled(busy)
-                        .on_click(cx.listener(move |view, _, window, cx| view.cloud_invite(role, window, cx)))),
+                row()
+                    .gap_3()
+                    .flex_wrap()
+                    .justify_between()
+                    .child(
+                        column()
+                            .gap_2()
+                            .child(
+                                row()
+                                    .gap_2()
+                                    .child(role_option("cloud-role-editor", Role::Editor))
+                                    .child(role_option("cloud-role-viewer", Role::Viewer)),
+                            )
+                            .child(muted(if role == Role::Editor {
+                                "Can edit shared requests."
+                            } else {
+                                "Can view and run shared requests."
+                            })),
+                    )
+                    .child(
+                        Button::new("cloud-create-invite")
+                            .primary()
+                            .label("Create invitation")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.cloud_invite(role, window, cx)
+                            })),
+                    ),
             )
             .children(panel.invite_code.map(|code| {
-                column().gap_2().rounded_md().bg(rgb(EDITOR)).p_3()
+                column()
+                    .gap_2()
+                    .rounded_md()
+                    .bg(rgb(EDITOR))
+                    .p_3()
                     .child(heading("Invitation code ready"))
-                    .child(muted("Share this code with your teammate. They can enter it under Join with code."))
-                    .child(row().gap_2().flex_wrap().justify_between()
-                        .child(div().text_xs().font_family("monospace").child(code.to_string()))
-                        .child(Button::new("cloud-copy-invite").outline().compact()
-                            .icon(if panel.invite_copied { IconName::Check } else { IconName::Copy })
-                            .label(if panel.invite_copied { "Copied" } else { "Copy code" })
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
-                                if let Some(panel) = &mut view.cloud.panel { panel.invite_copied = true; }
-                                cx.notify();
-                            }))))
+                    .child(muted(
+                        "Share this code with your teammate. It is valid for 7 days and one use.",
+                    ))
+                    .child(
+                        row()
+                            .gap_2()
+                            .flex_wrap()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family("monospace")
+                                    .child(code.to_string()),
+                            )
+                            .child(
+                                Button::new("cloud-copy-invite")
+                                    .outline()
+                                    .compact()
+                                    .icon(if panel.invite_copied {
+                                        IconName::Check
+                                    } else {
+                                        IconName::Copy
+                                    })
+                                    .label(if panel.invite_copied {
+                                        "Copied"
+                                    } else {
+                                        "Copy code"
+                                    })
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            code.to_string(),
+                                        ));
+                                        if let Some(panel) = &mut view.cloud.panel {
+                                            panel.invite_copied = true;
+                                        }
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
             }))
     }
+}
+
+fn workspace_menu_item(
+    label: impl Into<SharedString>,
+    icon: IconName,
+    workspace: &WeakEntity<Workspace>,
+    action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Clone + 'static,
+) -> PopupMenuItem {
+    let workspace = workspace.clone();
+    PopupMenuItem::new(label)
+        .icon(icon)
+        .on_click(move |_, window, cx| {
+            let workspace = workspace.clone();
+            let action = action.clone();
+            window.defer(cx, move |window, cx| {
+                _ = workspace.update(cx, |view, cx| action(view, window, cx));
+            });
+        })
+}
+
+fn directory_status(mounted: &Mounted) -> Div {
+    if mounted.unreachable {
+        status_badge("Offline", AMBER, AMBER_BG)
+    } else if !mounted.cache.conflicts().is_empty() {
+        status_badge("Conflict", RED, ERROR_BG)
+    } else if mounted.sync_error.is_some() {
+        status_badge("Sync unavailable", RED, ERROR_BG)
+    } else if mounted.team.role.can_edit() && !mounted.cache.pending.is_empty() {
+        status_badge("Syncing", AMBER, AMBER_BG)
+    } else {
+        status_badge("Current", GREEN, SELECTED)
+    }
+}
+
+fn section_heading(label: &'static str) -> Div {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(MUTED))
+        .child(label)
+}
+
+fn workspace_identity(name: impl Into<SharedString>, detail: &'static str) -> Div {
+    column()
+        .flex_1()
+        .min_w_0()
+        .gap_1()
+        .child(
+            div()
+                .truncate()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(name.into()),
+        )
+        .child(
+            div()
+                .truncate()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child(detail),
+        )
 }
 
 fn card() -> Div {
@@ -971,25 +1331,16 @@ fn field(label: &'static str, input: &Entity<InputState>, busy: bool) -> Div {
     column()
         .gap_1()
         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
-        .child(Input::new(input).aria_label(label).disabled(busy))
+        .child(Input::new(input).small().aria_label(label).disabled(busy))
 }
 
 fn role_badge(role: Role) -> Div {
     let (background, color) = match role {
-        Role::Owner => (SELECTED, ACCENT),
-        Role::Editor => (0x182b28, GREEN),
+        Role::Owner => (VIOLET_BG, VIOLET),
+        Role::Editor => (SELECTED, GREEN),
         Role::Viewer => (EDITOR, MUTED),
     };
-    div()
-        .flex_shrink_0()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .bg(rgb(background))
-        .text_xs()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(color))
-        .child(role.label())
+    status_badge(role.label(), color, background)
 }
 
 fn notice(symbol: IconName, color: u32, background: u32, message: String) -> Div {

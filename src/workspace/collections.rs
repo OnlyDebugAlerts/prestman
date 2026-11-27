@@ -501,6 +501,9 @@ impl Workspace {
         if self.requests.is_empty() {
             self.new_request(window, cx);
         } else {
+            if self.active().id != selected_id {
+                self.restore_request_view();
+            }
             self.show_selection(window, cx);
         }
     }

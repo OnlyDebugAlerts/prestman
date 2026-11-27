@@ -253,7 +253,7 @@ impl Storage {
         };
         let server: CloudServer = serde_json::from_reader(BufReader::new(file))
             .context("Could not read the saved cloud server")?;
-        CloudServer::parse(&server.url, &server.key).map(Some)
+        CloudServer::parse(&server.url, server.key.as_deref().unwrap_or_default()).map(Some)
     }
 
     pub(crate) fn save_cloud_server(&self, server: &CloudServer) -> Result<()> {
@@ -406,9 +406,14 @@ mod tests {
         let (storage, _) = Storage::open_in(directory.path().into())?;
         let saved = storage.load_cloud_server()?.unwrap();
         assert_eq!(saved.url, "https://cloud.example.test");
-        assert_eq!(saved.key, "sb_publishable_example");
-        assert!(CloudServer::parse("http://cloud.example.test", &saved.key).is_err());
-        assert!(CloudServer::parse("https://cloud.example.test/auth/v1", &saved.key).is_err());
+        assert_eq!(saved.key.as_deref(), Some("sb_publishable_example"));
+        assert!(CloudServer::parse("http://cloud.example.test", "").is_err());
+        assert!(CloudServer::parse("https://cloud.example.test/auth/v1", "").is_err());
+
+        storage.save_cloud_server(&CloudServer::parse("https://self-hosted.example.test", "")?)?;
+        let saved = storage.load_cloud_server()?.unwrap();
+        assert_eq!(saved.url, "https://self-hosted.example.test");
+        assert!(saved.key.is_none());
         fs::write(
             directory.path().join("cloud-server.json"),
             r#"{"url":"https://cloud.example.test","key":"sb_secret_example"}"#,

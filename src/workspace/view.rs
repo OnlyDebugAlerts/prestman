@@ -16,29 +16,43 @@ use super::navigation::*;
 use super::*;
 use crate::request::{Authorization, path_parameter, path_range};
 
-pub(super) const BACKGROUND: u32 = 0x111118;
-const SIDEBAR: u32 = 0x171720;
-pub(super) const SURFACE: u32 = 0x1c1c28;
-pub(super) const EDITOR: u32 = 0x13131c;
-pub(super) const BORDER: u32 = 0x2c2c3b;
-const TEXT: u32 = 0xebebf5;
-pub(super) const MUTED: u32 = 0x9a99ac;
-pub(super) const ACCENT: u32 = 0xb4a0ff;
-pub(super) const SELECTED: u32 = 0x272039;
-pub(super) const GREEN: u32 = 0x79d8b0;
-const AMBER: u32 = 0xf1bf79;
-pub(super) const RED: u32 = 0xf49aab;
+pub(super) const BACKGROUND: u32 = 0x10151d;
+pub(super) const SIDEBAR: u32 = 0x131c27;
+pub(super) const SURFACE: u32 = 0x192430;
+pub(super) const RAISED: u32 = 0x232f3d;
+pub(super) const EDITOR: u32 = 0x0d141d;
+pub(super) const BORDER: u32 = 0x344658;
+pub(super) const TEXT: u32 = 0xeef4fd;
+pub(super) const MUTED: u32 = 0xabbacb;
+pub(super) const FAINT: u32 = 0x8499af;
+pub(super) const ACCENT: u32 = 0x72edc6;
+const ON_ACCENT: u32 = 0x102921;
+pub(super) const SELECTED: u32 = 0x1b3834;
+pub(super) const VIOLET: u32 = 0xc4adff;
+pub(super) const VIOLET_BG: u32 = 0x302743;
+pub(super) const GREEN: u32 = ACCENT;
+pub(super) const AMBER: u32 = 0xffd391;
+pub(super) const AMBER_BG: u32 = 0x3d3024;
+pub(super) const RED: u32 = 0xffacaa;
+pub(super) const ERROR_BG: u32 = 0x422b32;
 
-const REQUEST_TAB_HEIGHT: Pixels = px(32.);
-const REQUEST_TAB_WIDTH: Pixels = px(140.);
+const REQUEST_TAB_BAR_HEIGHT: Pixels = px(34.);
+const REQUEST_TAB_HEIGHT: Pixels = px(28.);
+const REQUEST_TAB_WIDTH: Pixels = px(134.);
+const PANE_BAR_HEIGHT: Pixels = px(32.);
+pub(super) const REQUEST_CONTROL_HEIGHT: Pixels = px(30.);
+const PAIR_ROW_HEIGHT: Pixels = px(30.);
+const PAIR_HEADER_HEIGHT: Pixels = px(25.);
+const PAIR_TABLE_MAX_WIDTH: Pixels = px(440.);
+const COMPACT_WINDOW_WIDTH: Pixels = px(1080.);
 
 // Sidebar density, in logical pixels.
 const SIDEBAR_ROW_HEIGHT: f32 = 28.;
-const SIDEBAR_ROW_GAP: f32 = 2.;
-const SIDEBAR_ROW_PADDING: f32 = 6.;
-const SIDEBAR_ITEM_GAP: f32 = 6.;
+const SIDEBAR_ROW_GAP: f32 = 1.;
+const SIDEBAR_ROW_PADDING: f32 = 5.;
+const SIDEBAR_ITEM_GAP: f32 = 5.;
 const SIDEBAR_COLLECTION_INDENT: f32 = 10.;
-const SIDEBAR_METHOD_WIDTH: f32 = 28.;
+const SIDEBAR_METHOD_WIDTH: f32 = 46.;
 const SIDEBAR_DIVIDER_WIDTH: Pixels = px(6.);
 const MIN_SIDEBAR_WIDTH: Pixels = px(180.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(480.);
@@ -99,23 +113,38 @@ pub fn set_theme(cx: &mut App) {
         theme.border = rgb(BORDER).into();
         theme.input = rgb(BORDER).into();
         theme.muted_foreground = rgb(MUTED).into();
+        theme.title_bar = rgb(SIDEBAR).into();
+        theme.title_bar_border = rgb(BORDER).into();
         theme.popover = rgb(SURFACE).into();
         theme.popover_foreground = rgb(TEXT).into();
-        theme.secondary = rgb(SURFACE).into();
-        theme.secondary_hover = rgb(SELECTED).into();
-        theme.button_primary = rgb(0x704ad6).into();
-        theme.button_primary_hover = rgb(0x8258ec).into();
-        theme.button_primary_active = rgb(0x6341bf).into();
-        theme.button_primary_foreground = rgb(0xffffff).into();
+        theme.secondary = rgb(RAISED).into();
+        theme.secondary_hover = rgb(BORDER).into();
+        theme.primary = rgb(ACCENT).into();
+        theme.primary_foreground = rgb(ON_ACCENT).into();
+        theme.button_primary = rgb(ACCENT).into();
+        theme.button_primary_hover = rgb(0x9bf6d9).into();
+        theme.button_primary_active = rgb(0x62d7b0).into();
+        theme.button_primary_foreground = rgb(ON_ACCENT).into();
         theme.ring = rgb(ACCENT).into();
         theme.caret = rgb(ACCENT).into();
-        theme.selection = rgb(0x433063).into();
+        theme.selection = rgb(0x284b52).into();
+        let editor = &mut std::sync::Arc::make_mut(&mut theme.highlight_theme).style;
+        editor.editor_background = Some(rgb(EDITOR).into());
+        editor.editor_gutter_background = Some(rgb(EDITOR).into());
     });
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = Self::compact_layout(window);
+        if self.last_compact_layout != compact {
+            self.last_compact_layout = compact;
+            if self.visualizer.is_some() {
+                self.sync_visualizer(window, cx);
+            }
+        }
         let variable_popup = self.variable_popup(window, cx);
+        let show_sidebar = !self.cloud_is_open() && (!compact || self.compact_sidebar_open);
         column()
             .relative()
             .key_context(WORKSPACE_CONTEXT)
@@ -142,7 +171,10 @@ impl Render for Workspace {
                 if this.cloud_is_open() || this.comparing_cloud() || this.openapi_import.is_some() {
                     return;
                 }
-                if this.variable_editor.is_some() {
+                if this.variable_editor.is_some()
+                    && (this.request_tabs.is_empty()
+                        || this.variable_editor_focus.contains_focused(window, cx))
+                {
                     this.save_variables(window, cx);
                 } else {
                     this.save_request(cx);
@@ -164,6 +196,10 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusRequests, window, cx| {
+                if this.cloud_is_open() {
+                    return;
+                }
+                this.compact_sidebar_open = Self::compact_layout(window);
                 this.focus_sidebar(window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusBody, window, cx| {
@@ -184,17 +220,11 @@ impl Render for Workspace {
                             window.remove_window();
                         }
                     }))
+                    .h(px(42.))
                     .bg(rgb(SIDEBAR))
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .child(
-                        row()
-                            .gap_2()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(img("prestman-logo.png").size(px(22.)))
-                            .child("Prestman")
-                            .children(self.update_button(cx)),
-                    ),
+                    .child(self.workspace_bar(cx)),
             )
             .children(self.update_status(cx))
             .child(
@@ -202,16 +232,72 @@ impl Render for Workspace {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.sidebar(window, cx))
-                    .child(self.sidebar_divider(window, cx))
-                    .child(self.main_panel(cx)),
+                    .when(show_sidebar, |area| {
+                        area.child(self.sidebar(window, cx))
+                            .child(self.sidebar_divider(window, cx))
+                    })
+                    .child(self.main_panel(compact, window, cx)),
             )
             .children(variable_popup)
     }
 }
 
 impl Workspace {
-    fn main_panel(&self, cx: &Context<Self>) -> impl IntoElement {
+    pub(super) fn compact_layout(window: &Window) -> bool {
+        window.viewport_size().width < COMPACT_WINDOW_WIDTH
+    }
+
+    fn workspace_bar(&self, cx: &Context<Self>) -> Div {
+        row()
+            .size_full()
+            .min_w_0()
+            .pr_2()
+            .gap_2()
+            .child(
+                row()
+                    .gap_2()
+                    .flex_shrink_0()
+                    .child(
+                        row()
+                            .justify_center()
+                            .size(px(24.))
+                            .rounded_md()
+                            .bg(rgb(SELECTED))
+                            .child(
+                                svg()
+                                    .path("prestman-mark.svg")
+                                    .size(px(16.))
+                                    .text_color(rgb(ACCENT)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("Prestman"),
+                    ),
+            )
+            .child(self.workspace_switcher(cx))
+            .children(self.update_button(cx))
+            .child(div().flex_1().min_w_0())
+            .child(
+                Button::new("find-request")
+                    .outline()
+                    .small()
+                    .disabled(!self.request_view_visible())
+                    .flex_shrink_0()
+                    .h(REQUEST_CONTROL_HEIGHT)
+                    .icon(IconName::Search)
+                    .label("Search requests")
+                    .child(shortcut_hint("K"))
+                    .tooltip_with_action("Search requests", &FindRequest, Some(WORKSPACE_CONTEXT))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_request_finder(window, cx)),
+                    ),
+            )
+    }
+
+    fn main_panel(&self, compact: bool, window: &Window, cx: &Context<Self>) -> Div {
         if let Some(panel) = self.cloud_panel(cx) {
             return panel;
         }
@@ -221,17 +307,14 @@ impl Workspace {
         if let Some(import) = &self.openapi_import {
             return self.openapi_import_panel(import, cx);
         }
-        if self.variable_editor.is_some() {
-            return self.variables_editor(cx);
-        }
         column()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .children(self.team_status(cx))
-            .child(self.request_tab_bar(cx))
+            .child(self.request_tab_bar(compact, cx))
             .when(!self.request_tabs.is_empty(), |panel| {
-                panel.child(self.toolbar(cx))
+                panel.child(self.toolbar(compact, window, cx))
             })
             .children(
                 self.storage
@@ -242,45 +325,140 @@ impl Workspace {
                         div()
                             .px_3()
                             .py_2()
-                            .bg(rgb(0x341f2c))
+                            .bg(rgb(ERROR_BG))
                             .text_color(rgb(RED))
                             .child(error.clone())
                     }),
             )
-            .when_else(
-                self.request_tabs.is_empty(),
-                |panel| {
-                    panel.child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgb(MUTED))
-                            .child("Open a request from the sidebar or create a new tab"),
-                    )
-                },
-                |panel| {
-                    panel.child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_h_0()
-                            .min_w_0()
-                            .child(self.request_editor(cx))
-                            .child(self.response_view(cx)),
-                    )
+            .child(self.workbench_content(compact, cx))
+    }
+
+    fn workbench_content(&self, compact: bool, cx: &Context<Self>) -> Div {
+        if self.variable_editor.is_some() {
+            if compact || self.request_tabs.is_empty() {
+                return column().flex_1().min_h_0().child(self.variables_editor(cx));
+            }
+            return div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(self.request_editor(false, cx))
+                .child(
+                    self.variables_editor(cx)
+                        .flex_none()
+                        .w(px(420.))
+                        .bg(rgb(SIDEBAR)),
+                );
+        }
+        if self.request_tabs.is_empty() {
+            return empty_panel(
+                icon(IconName::Library, 22., ACCENT),
+                "Open a request",
+                "Select a request from Collections or find it by name, method, or URL.",
+            )
+            .child(
+                Button::new("find-empty-request")
+                    .primary()
+                    .label("Search requests")
+                    .tooltip_with_action("Search requests", &FindRequest, Some(WORKSPACE_CONTEXT))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_request_finder(window, cx)),
+                    ),
+            );
+        }
+        if compact {
+            return column()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(self.compact_pane_bar(cx))
+                .when_else(
+                    self.compact_pane == CompactPane::Request,
+                    |area| area.child(self.request_editor(true, cx)),
+                    |area| area.child(self.response_view(cx)),
+                );
+        }
+        div()
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(self.request_editor(false, cx))
+            .child(self.response_view(cx))
+    }
+
+    fn compact_pane_bar(&self, cx: &Context<Self>) -> Div {
+        row()
+            .h(PANE_BAR_HEIGHT)
+            .px_2()
+            .gap_1()
+            .flex_shrink_0()
+            .bg(rgb(SIDEBAR))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .children(
+                [
+                    (CompactPane::Request, "compact-request", "Request"),
+                    (CompactPane::Response, "compact-response", "Response"),
+                ]
+                .map(|(pane, id, label)| {
+                    pane_button(id, label, self.compact_pane == pane).on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            this.compact_pane = pane;
+                            this.sync_visualizer(window, cx);
+                            cx.notify();
+                        },
+                    ))
+                }),
+            )
+            .when(
+                self.compact_pane == CompactPane::Request,
+                |bar| match &self.active().response {
+                    RequestResponse::Finished { response, .. } => bar.child(response_status(
+                        response,
+                        self.active().draft.grpc.is_some(),
+                    )),
+                    RequestResponse::Sending { .. } => {
+                        bar.child(status_badge("Sending…", MUTED, RAISED))
+                    }
+                    RequestResponse::Failed(_) => {
+                        bar.child(status_badge("Request failed", RED, ERROR_BG))
+                    }
+                    RequestResponse::Idle => bar,
                 },
             )
     }
 
-    fn request_tab_bar(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn request_tab_bar(&self, compact: bool, cx: &Context<Self>) -> impl IntoElement {
         row()
-            .h(REQUEST_TAB_HEIGHT)
+            .h(REQUEST_TAB_BAR_HEIGHT)
             .flex_shrink_0()
             .border_b_1()
             .border_color(rgb(BORDER))
-            .bg(rgb(SIDEBAR))
+            .bg(rgb(BACKGROUND))
+            .px_2()
+            .gap_1()
+            .when(compact, |bar| {
+                bar.child(
+                    Button::new("toggle-collections")
+                        .ghost()
+                        .small()
+                        .compact()
+                        .flex_shrink_0()
+                        .icon(IconName::Library)
+                        .label("Collections")
+                        .toggled(self.compact_sidebar_open)
+                        .tooltip_with_action("Collections", &FocusRequests, Some(WORKSPACE_CONTEXT))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.compact_sidebar_open = !this.compact_sidebar_open;
+                            if this.compact_sidebar_open {
+                                this.focus_sidebar(window, cx);
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 row()
                     .id("open-request-tabs")
@@ -288,6 +466,7 @@ impl Workspace {
                     .aria_label("Open requests")
                     .h_full()
                     .min_w_0()
+                    .gap_1()
                     .overflow_x_scroll()
                     .track_scroll(&self.request_tabs_scroll)
                     .on_drag_move(cx.listener(
@@ -328,21 +507,6 @@ impl Workspace {
                     .tooltip_with_action("New request tab", &NewRequest, Some(WORKSPACE_CONTEXT))
                     .on_click(cx.listener(|this, _, window, cx| this.new_request(window, cx))),
             )
-            .child(div().flex_1())
-            .child(
-                Button::new("find-request")
-                    .ghost()
-                    .compact()
-                    .small()
-                    .mx_1()
-                    .flex_shrink_0()
-                    .icon(IconName::Search)
-                    .accessibility_label("Search requests")
-                    .tooltip_with_action("Search requests", &FindRequest, Some(WORKSPACE_CONTEXT))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_request_finder(window, cx);
-                    })),
-            )
     }
 
     fn request_tab(&self, index: usize, cx: &Context<Self>) -> impl IntoElement {
@@ -351,18 +515,19 @@ impl Workspace {
         let active = index == self.selected;
         let method = entry.draft.method_badge();
         let title = SharedString::from(entry.draft.title());
-        let dirty = entry.is_dirty();
+        let dirty = entry.is_dirty() && !self.viewer_draft_saved(entry);
         div()
             .id(("request-tab", id))
             .relative()
             .flex()
             .flex_col()
             .w(REQUEST_TAB_WIDTH)
-            .h_full()
+            .h(REQUEST_TAB_HEIGHT)
             .flex_shrink_0()
             .text_size(px(12.))
-            .border_r_1()
-            .border_color(rgb(BORDER))
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(if active { ACCENT } else { BORDER }))
             .bg(rgb(if active { SURFACE } else { SIDEBAR }))
             .hover(|style| style.bg(rgb(SURFACE)))
             .child(
@@ -379,6 +544,8 @@ impl Workspace {
                             .when(dirty, |tab| tab.aria_description("Unsaved changes"))
                             .focusable()
                             .tab_stop(true)
+                            .rounded_md()
+                            .focus_visible(|style| style.bg(rgb(SELECTED)))
                             .cursor_grab()
                             .h_full()
                             .flex_1()
@@ -446,7 +613,6 @@ impl Workspace {
                             })),
                     ),
             )
-            .child(div().h(px(2.)).when(active, |line| line.bg(rgb(ACCENT))))
             .child(self.request_tab_drop_target(id, false, cx))
             .child(self.request_tab_drop_target(id, true, cx))
     }
@@ -548,16 +714,17 @@ impl Workspace {
             .bg(rgb(SIDEBAR))
             .child(
                 row()
-                    .h(px(34.))
+                    .h(px(36.))
                     .px_2()
                     .gap_1()
                     .flex_shrink_0()
-                    .justify_end()
-                    .children(self.team_sidebar_controls(cx))
+                    .child(section_label("Collections"))
+                    .child(div().flex_1())
                     .child(
                         Button::new("add-sidebar-item")
                             .ghost()
                             .compact()
+                            .small()
                             .icon(IconName::Plus)
                             .accessibility_label("New request or collection")
                             .disabled(self.cloud_is_open())
@@ -605,20 +772,25 @@ impl Workspace {
                     })),
             )
             .child(
-                row()
-                    .h(px(32.))
+                column()
                     .px_2()
+                    .py_1()
                     .border_t_1()
                     .border_color(rgb(BORDER))
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child(div().flex_1())
                     .child(
                         Button::new("settings")
                             .ghost()
-                            .compact()
-                            .icon(IconName::Settings2)
+                            .small()
                             .accessibility_label("Settings")
+                            .child(
+                                row()
+                                    .w_full()
+                                    .gap_2()
+                                    .child(icon(IconName::Settings2, 16., MUTED))
+                                    .child("Settings"),
+                            )
                             .dropdown_caret(false)
                             .tooltip("Settings")
                             .dropdown_menu(move |menu, _, cx| {
@@ -942,6 +1114,7 @@ impl Workspace {
                 div()
                     .w(px(SIDEBAR_METHOD_WIDTH))
                     .flex_shrink_0()
+                    .truncate()
                     .text_size(px(10.))
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(method_color(entry.draft.method_badge())))
@@ -976,7 +1149,7 @@ impl Workspace {
                     .text_color(rgb(if active || cursor { TEXT } else { MUTED }))
                     .child(title.clone())
             })
-            .when(entry.is_dirty(), |row| {
+            .when(entry.is_dirty() && !self.viewer_draft_saved(entry), |row| {
                 row.child(
                     div()
                         .size(px(5.))
@@ -1009,53 +1182,126 @@ impl Workspace {
             })
     }
 
-    fn toolbar(&self, cx: &Context<Self>) -> Div {
+    fn request_identity(&self, compact: bool) -> Div {
         let entry = self.active();
+        let clean = self.viewer_draft_saved(entry) || !entry.is_dirty();
+        let save_status = if !clean {
+            Some(status_badge("Unsaved changes", AMBER, AMBER_BG))
+        } else if self.in_team() && self.team_can_edit() {
+            // The team banner reports whether the saved snapshot has synced.
+            Some(status_badge("Saved", MUTED, RAISED))
+        } else {
+            None
+        };
+        row()
+            .min_w_0()
+            .gap_2()
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(if compact { 16. } else { 18. }))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(entry.draft.title().to_owned()),
+            )
+            .children(save_status.map(|badge| badge.flex_shrink_0()))
+    }
+
+    fn save_request_button(&self, cx: &Context<Self>) -> Button {
+        let viewer = self.in_team() && !self.team_can_edit();
+        let label = if viewer { "Save local draft" } else { "Save" };
+        Button::new("save-request")
+            .outline()
+            .small()
+            .flex_shrink_0()
+            .h(REQUEST_CONTROL_HEIGHT)
+            .label(label)
+            .tooltip_with_action(label, &SaveRequest, Some(WORKSPACE_CONTEXT))
+            .disabled(
+                !self.active().is_dirty()
+                    || self.viewer_draft_saved(self.active())
+                    || self.storage.is_err(),
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.save_request(cx)))
+    }
+
+    fn toolbar(&self, compact: bool, window: &Window, cx: &Context<Self>) -> Div {
+        let entry = self.active();
+        let toolbar = column()
+            .flex_shrink_0()
+            .px_2()
+            .py_1p5()
+            .gap_1p5()
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(SIDEBAR))
+            .child(self.request_identity(compact));
         if entry.draft.grpc.is_some() {
-            return self.grpc_toolbar(cx);
+            return toolbar.child(self.grpc_toolbar(cx));
         }
         let sending = entry.response.is_sending();
         let graphql = entry.draft.graphql.is_some();
-        column()
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(rgb(BORDER))
+        toolbar
             .child(
                 row()
-                    .p_3()
-                    .gap_2()
+                    .gap_1p5()
                     .child(
                         row()
+                            .id("request-address-bar")
                             .flex_1()
                             .min_w_0()
-                            .h(px(40.))
+                            .h(REQUEST_CONTROL_HEIGHT)
                             .rounded_md()
-                            .bg(rgb(SURFACE))
+                            .bg(rgb(EDITOR))
                             .border_1()
-                            .border_color(rgb(BORDER))
-                            .child(
-                                div()
-                                    .w(px(114.))
-                                    .flex_shrink_0()
-                                    .border_r_1()
-                                    .border_color(rgb(BORDER))
-                                    .child(if graphql {
-                                        row()
-                                            .h_full()
-                                            .px_3()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(ACCENT))
-                                            .child("GraphQL")
-                                            .into_any_element()
-                                    } else {
-                                        Select::new(&self.method)
-                                            .w_full()
-                                            .appearance(false)
-                                            .accessibility_label("HTTP method")
-                                            .text_color(rgb(method_color(&entry.draft.method)))
-                                            .into_any_element()
-                                    }),
-                            )
+                            .border_color(rgb(if self.url.focus_handle(cx).is_focused(window) {
+                                ACCENT
+                            } else {
+                                BORDER
+                            }))
+                            .when(graphql, |bar| {
+                                bar.child(
+                                    row()
+                                        .w(px(72.))
+                                        .h_full()
+                                        .flex_shrink_0()
+                                        .border_r_1()
+                                        .border_color(rgb(BORDER))
+                                        .bg(rgb(SURFACE))
+                                        .px_2()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(VIOLET))
+                                        .child("GraphQL"),
+                                )
+                            })
+                            .when(!graphql, |bar| {
+                                let method = entry.draft.method.as_str();
+                                let color = Hsla::from(rgb(method_color(method)));
+                                bar.child(
+                                    div()
+                                        .ml(px(3.))
+                                        .w(px(if method.len() > 4 { 86. } else { 64. }))
+                                        .h(px(22.))
+                                        .flex_shrink_0()
+                                        .child(
+                                            Select::new(&self.method)
+                                                .xsmall()
+                                                .w_full()
+                                                .h_full()
+                                                .px_1()
+                                                .py_0()
+                                                .rounded_sm()
+                                                .border_color(transparent_black())
+                                                .bg(color.opacity(0.12))
+                                                .text_size(px(11.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(color)
+                                                .menu_width(px(108.))
+                                                .accessibility_label("HTTP method"),
+                                        ),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex_1()
@@ -1073,9 +1319,13 @@ impl Workspace {
                                         self.variable_field(
                                             &self.url,
                                             Textarea::new(&self.url)
+                                                .small()
+                                                .font_family(
+                                                    Theme::global(cx).mono_font_family.clone(),
+                                                )
                                                 .appearance(false)
                                                 .bordered(false)
-                                                .h(px(38.))
+                                                .h(REQUEST_CONTROL_HEIGHT - px(2.))
                                                 .aria_label("Request URL")
                                                 .on_paste({
                                                     let url = self.url.clone();
@@ -1132,19 +1382,34 @@ impl Workspace {
                                     ),
                             ),
                     )
+                    .child(self.inspect_url_variables_button(compact, cx))
+                    .child(self.save_request_button(cx))
                     .child(
                         Button::new("send-request")
                             .primary()
-                            .h(px(40.))
-                            .px_2()
-                            .icon(IconName::ArrowRight)
+                            .small()
+                            .flex_shrink_0()
+                            .h(REQUEST_CONTROL_HEIGHT)
                             .label(if sending { "Sending…" } else { "Send" })
-                            .disabled(sending)
+                            .disabled(sending || self.variable_editor.is_some())
+                            .tooltip_with_action(
+                                "Send request",
+                                &SendRequest,
+                                Some(WORKSPACE_CONTEXT),
+                            )
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.send_request(window, cx)),
                             ),
                     ),
             )
+            .when(!graphql && entry.draft.url.is_empty() && !compact, |bar| {
+                bar.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(FAINT))
+                        .child("Paste a URL or a cURL command."),
+                )
+            })
     }
 
     fn grpc_toolbar(&self, cx: &Context<Self>) -> Div {
@@ -1162,25 +1427,22 @@ impl Workspace {
         };
         column()
             .flex_shrink_0()
-            .p_3()
-            .gap_2()
-            .border_b_1()
-            .border_color(rgb(BORDER))
+            .gap_1p5()
             .child(
                 row()
-                    .gap_2()
+                    .gap_1p5()
                     .child(
                         row()
                             .flex_1()
                             .min_w_0()
-                            .h(px(40.))
+                            .h(REQUEST_CONTROL_HEIGHT)
                             .rounded_md()
                             .bg(rgb(SURFACE))
                             .border_1()
                             .border_color(rgb(BORDER))
                             .child(
                                 row()
-                                    .w(px(40.))
+                                    .w(REQUEST_CONTROL_HEIGHT)
                                     .h_full()
                                     .flex_shrink_0()
                                     .justify_center()
@@ -1189,6 +1451,7 @@ impl Workspace {
                                     .child(
                                         Button::new("grpc-tls")
                                             .ghost()
+                                            .small()
                                             .compact()
                                             .icon(if tls_enabled {
                                                 IconName::Lock
@@ -1225,9 +1488,10 @@ impl Workspace {
                                         self.variable_field(
                                             &self.url,
                                             Textarea::new(&self.url)
+                                                .small()
                                                 .appearance(false)
                                                 .bordered(false)
-                                                .h(px(38.))
+                                                .h(REQUEST_CONTROL_HEIGHT - px(2.))
                                                 .aria_label("gRPC server address"),
                                             cx,
                                         ),
@@ -1237,32 +1501,34 @@ impl Workspace {
                     .child(
                         div()
                             .w(relative(0.30))
-                            .min_w(px(150.))
-                            .max_w(px(300.))
+                            .min_w(px(130.))
+                            .max_w(px(240.))
                             .child(
                                 Select::new(&self.method)
+                                    .small()
                                     .w_full()
+                                    .h(REQUEST_CONTROL_HEIGHT)
                                     .placeholder("Select a method")
                                     .accessibility_label("gRPC method")
                                     .disabled(run.is_some() || !has_methods),
                             ),
                     )
-                    .child(
-                        Button::new("grpc-save")
-                            .outline()
-                            .label("Save")
-                            .disabled(!entry.is_dirty() || self.storage.is_err())
-                            .on_click(cx.listener(|this, _, _, cx| this.save_request(cx))),
-                    )
+                    .child(self.save_request_button(cx))
                     .child(
                         Button::new("grpc-invoke")
                             .primary()
+                            .small()
+                            .h(REQUEST_CONTROL_HEIGHT)
                             .label(if run.is_some() { "Send" } else { "Invoke" })
-                            .disabled(if run.is_some() {
-                                !can_send
-                            } else {
-                                entry.draft.method.is_empty() || entry.draft.url.trim().is_empty()
-                            })
+                            .disabled(
+                                self.variable_editor.is_some()
+                                    || if run.is_some() {
+                                        !can_send
+                                    } else {
+                                        entry.draft.method.is_empty()
+                                            || entry.draft.url.trim().is_empty()
+                                    },
+                            )
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.send_request(window, cx)),
                             ),
@@ -1271,6 +1537,8 @@ impl Workspace {
                         bar.child(
                             Button::new("grpc-end")
                                 .outline()
+                                .small()
+                                .h(REQUEST_CONTROL_HEIGHT)
                                 .label("End Streaming")
                                 .on_click(cx.listener(|this, _, _, cx| this.end_grpc_stream(cx))),
                         )
@@ -1279,6 +1547,8 @@ impl Workspace {
                         bar.child(
                             Button::new("grpc-cancel")
                                 .outline()
+                                .small()
+                                .h(REQUEST_CONTROL_HEIGHT)
                                 .label("Cancel")
                                 .on_click(cx.listener(|this, _, _, cx| this.cancel_grpc_call(cx))),
                         )
@@ -1415,11 +1685,11 @@ impl Workspace {
             )
     }
 
-    fn request_editor(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn request_editor(&self, compact: bool, cx: &Context<Self>) -> impl IntoElement {
         let grpc = self.active().draft.grpc.is_some();
         let graphql = self.active().draft.graphql.is_some();
         let tabs = [
-            (
+            Some((
                 "request-body",
                 if grpc {
                     "Message"
@@ -1429,71 +1699,69 @@ impl Workspace {
                     "Body"
                 },
                 RequestPane::Body,
-            ),
-            (
+            )),
+            graphql.then_some((
                 "graphql-variables",
                 "Variables",
                 RequestPane::GraphqlVariables,
-            ),
-            ("graphql-schema", "Schema", RequestPane::GraphqlSchema),
-            ("request-auth", "Authorization", RequestPane::Authorization),
-            (
-                "request-query",
-                if grpc {
-                    "Service definition"
-                } else if graphql {
-                    "Params"
-                } else {
-                    "Query"
-                },
-                if grpc {
-                    RequestPane::ServiceDefinition
-                } else {
-                    RequestPane::Pairs(PairKind::Query)
-                },
-            ),
-            (
+            )),
+            graphql.then_some(("graphql-schema", "Schema", RequestPane::GraphqlSchema)),
+            Some(if grpc {
+                (
+                    "request-service",
+                    "Service definition",
+                    RequestPane::ServiceDefinition,
+                )
+            } else {
+                (
+                    "request-query",
+                    "Params",
+                    RequestPane::Pairs(PairKind::Query),
+                )
+            }),
+            Some((
                 "request-headers",
                 if grpc { "Metadata" } else { "Headers" },
                 RequestPane::Pairs(PairKind::Headers),
-            ),
+            )),
+            Some(("request-auth", "Authorization", RequestPane::Authorization)),
+            Some(("request-scripts", "Scripts", RequestPane::Scripts)),
         ];
         column()
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .border_r_1()
-            .border_color(rgb(BORDER))
+            .when(!compact, |panel| {
+                panel.border_r_1().border_color(rgb(BORDER)).child(
+                    row()
+                        .h(PANE_BAR_HEIGHT)
+                        .px_2()
+                        .flex_shrink_0()
+                        .child(section_label("Request"))
+                        .child(div().flex_1())
+                        .child(shortcut_hint("2")),
+                )
+            })
             .child(
                 row()
                     .id("request-tabs")
                     .overflow_x_scroll()
-                    .px_3()
-                    .h(px(40.))
+                    .px_2()
+                    .h(PANE_BAR_HEIGHT)
                     .gap_1()
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .children(
-                        tabs.into_iter()
-                            .filter(|(_, _, pane)| {
-                                graphql
-                                    || !matches!(
-                                        pane,
-                                        RequestPane::GraphqlVariables | RequestPane::GraphqlSchema
-                                    )
-                            })
-                            .map(|(id, label, pane)| {
-                                pane_button(id, label, self.request_pane == pane).on_click(
-                                    cx.listener(move |this, _, window, cx| {
-                                        if pane == RequestPane::Pairs(PairKind::Query) {
-                                            this.sync_path_variables(window, cx);
-                                        }
-                                        this.request_pane = pane;
-                                        cx.notify();
-                                    }),
-                                )
-                            }),
-                    ),
+                    .children(tabs.into_iter().flatten().map(|(id, label, pane)| {
+                        pane_button(id, label, self.request_pane == pane).on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                if pane == RequestPane::Pairs(PairKind::Query) {
+                                    this.sync_path_variables(window, cx);
+                                }
+                                this.request_pane = pane;
+                                cx.notify();
+                            },
+                        ))
+                    })),
             )
             .child(match self.request_pane {
                 RequestPane::Body if graphql => self.graphql_query_editor(cx),
@@ -1512,7 +1780,11 @@ impl Workspace {
                 }
                 RequestPane::GraphqlSchema => self.graphql_schema_editor(cx),
                 RequestPane::Pairs(PairKind::Query) => self.query_editor(cx),
-                RequestPane::Pairs(kind) => self.pairs_editor(kind, cx),
+                RequestPane::Pairs(kind) => column()
+                    .flex_1()
+                    .min_h_0()
+                    .p_2()
+                    .child(self.pairs_editor(kind, true, cx)),
                 RequestPane::Authorization => self.authorization_editor(cx),
                 RequestPane::Scripts => self.scripts_editor(cx),
                 RequestPane::ServiceDefinition => column()
@@ -1522,7 +1794,7 @@ impl Workspace {
             })
     }
 
-    fn variables_editor(&self, cx: &Context<Self>) -> Div {
+    fn variables_editor(&self, cx: &Context<Self>) -> Stateful<Div> {
         let editor = self
             .variable_editor
             .as_ref()
@@ -1582,6 +1854,8 @@ impl Workspace {
             ),
         };
         column()
+            .id("variable-editor")
+            .track_focus(&self.variable_editor_focus)
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -1669,13 +1943,19 @@ impl Workspace {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(&fields.name).aria_label("Variable name")),
+                    .child(Input::new(&fields.name).small().aria_label("Variable name")),
             )
-            .child(div().flex_1().min_w_0().child(self.variable_field(
-                &fields.value,
-                Input::new(&fields.value).aria_label("Variable value"),
-                cx,
-            )))
+            .child(
+                div().flex_1().min_w_0().child(
+                    self.variable_field(
+                        &fields.value,
+                        Input::new(&fields.value)
+                            .small()
+                            .aria_label("Variable value"),
+                        cx,
+                    ),
+                ),
+            )
             .child(
                 Button::new(("remove-variable", row_id))
                     .ghost()
@@ -1696,11 +1976,16 @@ impl Workspace {
             .min_h_0()
             .p_2()
             .gap_2()
-            .child(self.variable_field(
-                &self.graphql_fields.operation,
-                Input::new(&self.graphql_fields.operation).aria_label("GraphQL operation name"),
-                cx,
-            ))
+            .child(
+                self.variable_field(
+                    &self.graphql_fields.operation,
+                    Input::new(&self.graphql_fields.operation)
+                        .small()
+                        .max_w(px(280.))
+                        .aria_label("GraphQL operation name"),
+                    cx,
+                ),
+            )
             .child(editor_surface(
                 self.variable_field(
                     body,
@@ -1812,10 +2097,12 @@ impl Workspace {
 
     fn authorization_editor(&self, cx: &Context<Self>) -> Div {
         let field = |label, state: &Entity<InputState>, secret| {
-            column().gap_2().child(section_label(label)).child(
+            column().gap_1().child(section_label(label)).child(
                 self.variable_field(
                     state,
                     Input::new(state)
+                        .small()
+                        .max_w(px(360.))
                         .aria_label(label)
                         .when(secret, |input| input.mask_toggle()),
                     cx,
@@ -1853,17 +2140,21 @@ impl Workspace {
                 .id("request-parameters")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
                 .p_2()
-                .gap_4()
-                .child(self.pairs_editor(PairKind::Query, cx))
+                .gap_2()
                 .when(has_path_variables, |panel| {
-                    panel.child(self.pairs_editor(PairKind::Path, cx))
+                    panel
+                        .overflow_y_scroll()
+                        .track_scroll(&self.active().query_scroll)
+                })
+                .child(self.pairs_editor(PairKind::Query, !has_path_variables, cx))
+                .when(has_path_variables, |panel| {
+                    panel.child(self.pairs_editor(PairKind::Path, false, cx))
                 }),
         )
     }
 
-    fn pairs_editor(&self, kind: PairKind, cx: &Context<Self>) -> Div {
+    fn pairs_editor(&self, kind: PairKind, scroll_rows: bool, cx: &Context<Self>) -> Div {
         let (name_label, value_label, remove_label) = match kind {
             PairKind::Query => ("Parameter name", "Parameter value", "Remove parameter"),
             PairKind::Headers => ("Header name", "Header value", "Remove header"),
@@ -1874,78 +2165,78 @@ impl Workspace {
             ),
         };
         let fields = self.pair_fields(kind);
+        let field_count = fields.len();
+        let scroll = if kind == PairKind::Headers {
+            &self.active().headers_scroll
+        } else {
+            &self.active().query_scroll
+        };
+        let column_gutter = || div().w(px(18.)).flex_shrink_0();
         column()
-            .when(kind == PairKind::Headers, |panel| panel.flex_1().min_h_0().p_2())
-            .when(kind != PairKind::Headers, |panel| panel.flex_shrink_0())
-            .gap_2()
-            .when(kind != PairKind::Headers, |panel| panel.child(section_label(if kind == PairKind::Path { "Path variables" } else { "Query parameters" })))
-            .when(kind == PairKind::Path, |panel| panel.child(div().text_xs().text_color(rgb(MUTED)).child("Use :name in the URL path. Values belong to this request and can contain {{variables}}.")))
-            .when(!fields.is_empty(), |panel| {
-                panel.child(
-                    row()
-                        .gap_2()
-                        .text_xs()
-                        .text_color(rgb(MUTED))
-                        .child(div().w(px(20.)).flex_shrink_0())
-                        .child(div().flex_1().min_w_0().child("Name"))
-                        .child(div().flex_1().min_w_0().child("Value"))
-                        .child(div().w(px(28.)).flex_shrink_0()),
+            .when_else(scroll_rows, |panel| panel.flex_1().min_h_0(), |panel| panel.flex_shrink_0())
+            .gap_1p5()
+            .when(kind == PairKind::Query, |panel| {
+                panel.child(section_label("Query parameters").flex_shrink_0())
+            })
+            .when(kind == PairKind::Path, |panel| {
+                panel.child(section_label("Path variables")).child(
+                    div().text_xs().text_color(rgb(MUTED))
+                        .child("Use :name in the URL path. Values belong to this request and can contain {{variables}}."),
                 )
             })
             .child(
                 column()
-                    .id(match kind { PairKind::Query => "query-rows", PairKind::Headers => "header-rows", PairKind::Path => "path-rows" })
-                    .when(kind == PairKind::Headers, |rows| rows.flex_1().min_h_0().overflow_y_scroll())
-                    .when(kind != PairKind::Headers, |rows| rows.flex_shrink_0())
-                    .gap_2()
-                    .pb_1()
-                    .children(fields.iter().map(|fields| {
-                        let row_id = fields.name.entity_id();
-                        row()
-                            .gap_2()
-                            .flex_shrink_0()
-                            .child(
-                                div().w(px(20.)).flex_shrink_0().child(
-                                    Checkbox::new(("pair-enabled", row_id))
-                                        .checked(fields.enabled)
-                                        .accessibility_label(match kind {
-                                            PairKind::Query => "Send query parameter",
-                                            PairKind::Headers => "Send header",
-                                            PairKind::Path => "Substitute path variable",
-                                        })
-                                        .on_click(cx.listener(
-                                            move |this, enabled: &bool, window, cx| {
-                                                this.set_pair_enabled(
-                                                    kind, row_id, *enabled, window, cx,
-                                                );
-                                            },
-                                        )),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(self.variable_field(&fields.name, Input::new(&fields.name).aria_label(name_label), cx)),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(self.variable_field(&fields.value, Input::new(&fields.value).aria_label(value_label), cx)),
-                            )
-                            .child(
-                                Button::new(("remove-pair", row_id))
-                                    .ghost()
-                                    .compact()
-                                    .w(px(28.))
-                                    .icon(IconName::Close)
-                                    .accessibility_label(remove_label)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.remove_pair(kind, row_id, window, cx)
-                                    })),
-                            )
-                    })),
+                    .w_full().max_w(PAIR_TABLE_MAX_WIDTH)
+                    .when_else(scroll_rows, |table| {
+                        table.flex_1().min_h_0().max_h(PAIR_HEADER_HEIGHT + PAIR_ROW_HEIGHT * field_count as f32 + px(2.))
+                    }, |table| table.flex_shrink_0())
+                    .rounded_lg().border_1().border_color(rgb(BORDER)).overflow_hidden().bg(rgb(EDITOR))
+                    .when(!fields.is_empty(), |panel| {
+                        panel.child(
+                            row().h(PAIR_HEADER_HEIGHT).px_2().gap_1p5().flex_shrink_0()
+                                .bg(rgb(SURFACE)).border_b_1().border_color(rgb(BORDER))
+                                .text_xs().text_color(rgb(MUTED)).font_weight(FontWeight::SEMIBOLD)
+                                .child(column_gutter())
+                                .child(div().flex_1().min_w_0().px_2().child("Name"))
+                                .child(div().flex_1().min_w_0().px_2().child("Value"))
+                                .child(div().w(px(24.)).flex_shrink_0()),
+                        )
+                    })
+                    .child(
+                        column()
+                            .id(match kind { PairKind::Query => "query-rows", PairKind::Headers => "header-rows", PairKind::Path => "path-rows" })
+                            .when_else(scroll_rows, |rows| rows.flex_1().min_h_0().overflow_y_scroll().track_scroll(scroll), |rows| rows.flex_shrink_0())
+                            .children(fields.iter().enumerate().map(|(index, fields)| {
+                                let row_id = fields.name.entity_id();
+                                row()
+                                    .h(PAIR_ROW_HEIGHT).px_2().gap_1p5().flex_shrink_0()
+                                    .when(index + 1 < field_count, |row| row.border_b_1().border_color(rgb(BORDER)))
+                                    .child(column_gutter().child(
+                                        Checkbox::new(("pair-enabled", row_id))
+                                            .small()
+                                            .checked(fields.enabled)
+                                            .accessibility_label(match kind {
+                                                PairKind::Query => "Send query parameter",
+                                                PairKind::Headers => "Send header",
+                                                PairKind::Path => "Substitute path variable",
+                                            })
+                                            .on_click(cx.listener(move |this, enabled: &bool, window, cx| {
+                                                this.set_pair_enabled(kind, row_id, *enabled, window, cx);
+                                            })),
+                                    ))
+                                    .child(div().flex_1().min_w_0().child(self.variable_field(
+                                        &fields.name, Input::new(&fields.name).small().aria_label(name_label), cx,
+                                    )))
+                                    .child(div().flex_1().min_w_0().child(self.variable_field(
+                                        &fields.value, Input::new(&fields.value).small().aria_label(value_label), cx,
+                                    )))
+                                    .child(Button::new(("remove-pair", row_id)).ghost().small().compact().w(px(24.))
+                                        .flex_shrink_0().icon(IconName::Close).accessibility_label(remove_label)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.remove_pair(kind, row_id, window, cx)
+                                        })))
+                            })),
+                    ),
             )
     }
 
@@ -2086,13 +2377,36 @@ impl Workspace {
     }
 
     fn response_view(&self, cx: &Context<Self>) -> impl IntoElement {
-        let response = &self.active().response;
-        let body = self.response_pane == Pane::Body;
-        let received = matches!(response, RequestResponse::Finished { .. });
         let entry = self.active();
+        let response = &entry.response;
+        let body = self.response_pane == Pane::Body;
+        let finished = match response {
+            RequestResponse::Finished { response, .. } => Some(response),
+            _ => None,
+        };
+        let received = finished.is_some();
         let grpc = entry.draft.grpc.is_some();
         let streaming = entry.grpc_state.streaming;
         let live = response.is_sending() && grpc;
+        let tabs = [
+            Some(("response-body", "Body", Pane::Body, received)),
+            streaming.then_some(("grpc-messages", "Messages", Pane::Messages, true)),
+            Some((
+                "response-headers",
+                if grpc { "Metadata" } else { "Headers" },
+                Pane::Headers,
+                received || live,
+            )),
+            grpc.then_some(("grpc-trailers", "Trailers", Pane::Trailers, received)),
+            Some(("response-tests", "Tests", Pane::Tests, true)),
+            Some(("response-console", "Console", Pane::Console, true)),
+            Some((
+                "response-visualizer",
+                "Visualizer",
+                Pane::Visualizer,
+                received,
+            )),
+        ];
         column()
             .id("response-panel")
             .role(Role::Region)
@@ -2103,171 +2417,142 @@ impl Workspace {
             .min_w_0()
             .min_h_0()
             .child(
+                row().h(PANE_BAR_HEIGHT).px_2().gap_1p5().flex_shrink_0()
+                    .child(section_label("Response"))
+                    .child(div().flex_1())
+                    .children(finished.map(|response| response_metadata(response, grpc)))
+                    .child(shortcut_hint("3")),
+            )
+            .child(
                 row()
                     .id("response-tabs")
                     .overflow_x_scroll()
                     .px_2()
-                    .h(px(40.))
-                    .gap_2()
+                    .h(PANE_BAR_HEIGHT)
+                    .flex_shrink_0()
+                    .gap_1()
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .child(section_label("Response"))
-                    .child(div().flex_1())
-                    .child(
-                        pane_button("response-body", "Body", body)
-                            .disabled(!received)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.select_response_pane(Pane::Body, window, cx);
-                            })),
-                    )
-                    .when(streaming, |bar| {
-                        bar.child(pane_button("grpc-messages", "Messages", self.response_pane == Pane::Messages)
-                            .on_click(cx.listener(|this, _, window, cx| this.select_response_pane(Pane::Messages, window, cx))))
-                    })
-                    .child(
-                        pane_button(
-                            "response-visualizer", "Visualizer", self.response_pane == Pane::Visualizer,
-                        )
-                        .disabled(!received)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.select_response_pane(Pane::Visualizer, window, cx);
-                        })),
-                    )
-                    .child(
-                        pane_button(
-                            "response-headers",
-                            if grpc { "Metadata" } else { "Headers" },
-                            self.response_pane == Pane::Headers,
-                        )
-                        .disabled(!received && !live)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.select_response_pane(Pane::Headers, window, cx);
-                        })),
-                    )
-                    .when(grpc, |bar| {
-                        bar.child(pane_button("grpc-trailers", "Trailers", self.response_pane == Pane::Trailers)
-                            .disabled(!received)
-                            .on_click(cx.listener(|this, _, window, cx| this.select_response_pane(Pane::Trailers, window, cx))))
-                    }),
+                    .children(tabs.into_iter().flatten().map(|(id, label, pane, enabled)| {
+                        pane_button(id, label, self.response_pane == pane)
+                            .disabled(!enabled)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_response_pane(pane, window, cx);
+                            }))
+                    })),
             )
             .child(match (self.response_pane, response) {
                 (Pane::Visualizer, RequestResponse::Finished { .. }) => {
                     if let Some(error) = &self.visualizer_error {
-                        empty_panel(icon(IconName::CircleAlert, 24., RED), "Visualizer failed", error.clone())
-                    } else if let Some(view) = self.visualizer.as_ref().filter(|_| self.active().script_report.visualization.is_some()) {
+                        empty_panel(icon(IconName::CircleAlert, 20., RED), "Visualizer failed", error.clone())
+                    } else if let Some(view) = self.visualizer.as_ref().filter(|_| entry.script_report.visualization.is_some()) {
                         column().flex_1().min_h_0().child(view.clone())
                     } else {
-                        empty_panel(icon(IconName::Code, 24., ACCENT), "No visualization yet", "Call pm.visualizer.set(template, data) in a request script, then send it again.")
+                        empty_panel(icon(IconName::Code, 20., ACCENT), "No visualization yet", "Call pm.visualizer.set(template, data) in a request script, then send it again.")
                     }
                 },
-                (Pane::Tests, _) => column()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.script_results(false)),
+                (Pane::Tests, _) => column().flex_1().min_h_0().child(self.script_results(false)),
                 (Pane::Console, _) => column().flex_1().min_h_0().child(self.script_results(true)),
                 (_, RequestResponse::Idle) => empty_panel(
-                    icon(IconName::Inbox, 24., ACCENT),
+                    icon(IconName::Inbox, 20., ACCENT),
                     "No response yet",
-                    "Send a request to inspect its response.",
+                    "Send a request to see the response here.",
                 ),
                 (Pane::Messages | Pane::Headers, RequestResponse::Sending { .. }) if live => column()
                     .flex_1().min_h_0().p_2().gap_2()
                     .child(row().gap_2().child(Spinner::new()).child("Streaming"))
                     .child(editor_surface(Editor::new(&self.response_details).size_full().bordered(false).readonly(true))),
                 (_, RequestResponse::Sending { .. }) => empty_panel(
-                    Spinner::new(),
-                    "Waiting for response",
-                    "The request is in progress.",
+                    Spinner::new(), "Waiting for response", "The request is in progress.",
                 ),
                 (_, RequestResponse::Failed(error)) => empty_panel(
-                    icon(IconName::CircleAlert, 24., RED),
-                    "Request failed",
-                    error.clone(),
+                    icon(IconName::CircleAlert, 20., RED), "Request failed", error.clone(),
+                ).child(
+                    Button::new("retry-request")
+                        .outline()
+                        .small()
+                        .label(if grpc { "Invoke again" } else { "Send again" })
+                        .on_click(cx.listener(|this, _, window, cx| this.send_request(window, cx))),
                 ),
+                (Pane::Body, RequestResponse::Finished { response, .. }) if response.body.is_empty() => {
+                    empty_panel(icon(IconName::Inbox, 20., MUTED), "No response body", "The server returned an empty body.")
+                }
                 (_, RequestResponse::Finished { response, .. }) => column()
-                    .flex_1()
-                    .min_h_0()
-                    .p_2()
-                    .gap_2()
-                    .child(response_metadata(response, grpc))
+                    .flex_1().min_h_0().p_2()
                     .child(
                         editor_surface(
-                            Editor::new(self.response_editor())
-                                .size_full().bordered(false)
-                                .readonly(true)
-                                .aria_label(if body {
-                                    "Response body"
-                                } else {
-                                    "Response headers"
-                                })
-                                .when(!body, |editor| editor.text_color(rgb(0xb8cbe9))),
+                            column().size_full().min_h_0()
+                                .when(body, |panel| panel.child(row().h(px(26.)).px_2().flex_shrink_0()
+                                    .border_b_1().border_color(rgb(BORDER)).bg(rgb(SURFACE))
+                                    .text_xs().text_color(rgb(MUTED)).font_weight(FontWeight::SEMIBOLD)
+                                    .child(if response.is_json { "JSON" } else { "Text" })
+                                ))
+                                .child(div().flex_1().min_h_0().min_w_0().child(
+                                    Editor::new(self.response_editor())
+                                        .size_full().bordered(false).readonly(true)
+                                        .aria_label(match self.response_pane {
+                                            Pane::Body => "Response body",
+                                            Pane::Messages => "Stream messages",
+                                            Pane::Trailers => "Response trailers",
+                                            Pane::Headers if grpc => "Response metadata",
+                                            _ => "Response headers",
+                                        })
+                                        .when(!body, |editor| editor.text_color(rgb(0xb8cbe9))),
+                                )),
                         )
-                        .when(!body, |panel| panel.p_2())
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
                             this.open_response_link(event, cx);
                         })),
                     ),
             })
-            .child(
-                row().h(px(36.)).px_2().gap_1().flex_shrink_0()
-                    .border_t_1().border_color(rgb(BORDER))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("request-scripts").ghost().compact().icon(IconName::Code)
-                            .accessibility_label("Scripts").tooltip("Scripts")
-                            .bg(rgb(if self.request_pane == RequestPane::Scripts { SELECTED } else { BACKGROUND }))
-                            .text_color(rgb(if self.request_pane == RequestPane::Scripts { ACCENT } else { MUTED }))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.request_pane = if this.request_pane == RequestPane::Scripts { RequestPane::Body } else { RequestPane::Scripts };
-                                cx.notify();
-                            })),
-                    )
-                    .children([
-                        ("response-console", "Console", IconName::SquareTerminal, Pane::Console),
-                        ("response-tests", "Tests", IconName::CircleCheck, Pane::Tests),
-                    ].map(|(id, label, icon, pane)| {
-                        let selected = self.response_pane == pane;
-                        Button::new(id).ghost().compact().icon(icon)
-                            .accessibility_label(label).tooltip(label)
-                            .bg(rgb(if selected { SELECTED } else { BACKGROUND }))
-                            .text_color(rgb(if selected { ACCENT } else { MUTED }))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_response_pane(pane, window, cx);
-                            }))
-                    })),
-            )
     }
 }
 
-fn response_metadata(response: &Response, grpc: bool) -> Div {
-    let status_color = if grpc {
-        if response.status == 0 { GREEN } else { RED }
+pub(super) fn status_badge(label: impl Into<SharedString>, color: u32, background: u32) -> Div {
+    row()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .bg(rgb(background))
+        .text_size(px(11.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(color))
+        .child(
+            div()
+                .size(px(4.))
+                .rounded_full()
+                .bg(rgb(color))
+                .flex_shrink_0(),
+        )
+        .child(div().min_w_0().truncate().child(label.into()))
+}
+
+fn response_status(response: &Response, grpc: bool) -> Div {
+    let (color, background) = if grpc {
+        if response.status == 0 {
+            (GREEN, SELECTED)
+        } else {
+            (RED, ERROR_BG)
+        }
     } else {
         match response.status {
-            200..=299 => GREEN,
-            400..=599 => RED,
-            _ => AMBER,
+            200..=299 => (GREEN, SELECTED),
+            400..=599 => (RED, ERROR_BG),
+            _ => (AMBER, AMBER_BG),
         }
     };
-    let status = format!("{} {}", response.status, response.reason)
-        .trim_end()
-        .to_owned();
+    let status = format!("{} {}", response.status, response.reason);
+    status_badge(status.trim_end().to_owned(), color, background)
+}
+
+fn response_metadata(response: &Response, grpc: bool) -> Div {
     row()
         .min_w_0()
         .gap_2()
         .text_xs()
         .text_color(rgb(MUTED))
-        .child(
-            div()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(rgb(SURFACE))
-                .text_color(rgb(status_color))
-                .font_weight(FontWeight::SEMIBOLD)
-                .truncate()
-                .child(status),
-        )
+        .child(response_status(response, grpc))
         .child(
             div()
                 .flex_shrink_0()
@@ -2342,10 +2627,28 @@ fn editor_surface(editor: impl IntoElement) -> Div {
 fn pane_button(id: &'static str, label: &'static str, selected: bool) -> Button {
     Button::new(id)
         .ghost()
+        .small()
         .compact()
         .label(label)
+        .flex_shrink_0()
         .bg(rgb(if selected { SELECTED } else { BACKGROUND }))
         .text_color(rgb(if selected { ACCENT } else { MUTED }))
+}
+
+fn shortcut_hint(key: &str) -> Div {
+    let modifier = if cfg!(target_os = "macos") {
+        "⌘"
+    } else {
+        "Ctrl+"
+    };
+    div()
+        .flex_shrink_0()
+        .px_1()
+        .rounded_sm()
+        .text_size(px(10.))
+        .bg(rgb(RAISED))
+        .text_color(rgb(MUTED))
+        .child(format!("{modifier}{key}"))
 }
 
 fn section_label(label: &'static str) -> Div {
@@ -2360,7 +2663,7 @@ fn method_color(method: &str) -> u32 {
         "GET" => GREEN,
         "POST" => AMBER,
         "PUT" => 0x8cb9f6,
-        "PATCH" | "gRPC" | "GQL" => ACCENT,
+        "PATCH" | "gRPC" | "GQL" => VIOLET,
         "DELETE" => RED,
         _ => MUTED,
     }

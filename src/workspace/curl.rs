@@ -36,6 +36,7 @@ impl Workspace {
         self.save_error = None;
         self.variable_hover = None;
         if self.selected == index {
+            self.compact_pane = CompactPane::Request;
             self.request_pane = if !entry.draft.body.is_empty() {
                 RequestPane::Body
             } else if !entry.draft.query.is_empty() {

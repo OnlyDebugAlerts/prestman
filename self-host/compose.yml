@@ -92,13 +92,10 @@ services:
         condition: service_healthy
       rest:
         condition: service_healthy
-    environment:
-      ANON_KEY: ${ANON_KEY:?Run python3 self-host/manage.py init}
-      NGINX_ENVSUBST_FILTER: '^ANON_KEY$'
     ports:
       - "127.0.0.1:${PRESTMAN_PORT:-8800}:8080"
     volumes:
-      - ./gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./gateway.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/health"]
       interval: 3s

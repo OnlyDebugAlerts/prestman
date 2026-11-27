@@ -123,11 +123,16 @@ impl Workspace {
             .is_focused(window);
         let in_response = self.response_focus.contains_focused(window, cx);
         self.select_request(index, window, cx);
+        let compact = Self::compact_layout(window);
         if in_sidebar {
+            self.compact_sidebar_open = true;
             self.focus_sidebar(window, cx);
-        } else if in_body {
+        } else if in_body
+            && self.request_pane == RequestPane::Body
+            && (!compact || self.compact_pane == CompactPane::Request)
+        {
             self.focus_body(window, cx);
-        } else if in_response {
+        } else if in_response && (!compact || self.compact_pane == CompactPane::Response) {
             self.focus_response_pane(window, cx);
         } else {
             self.focus_url(window, cx);
@@ -138,10 +143,15 @@ impl Workspace {
         if !self.request_view_visible() || self.request_tabs.is_empty() {
             return;
         }
+        self.compact_sidebar_open = false;
+        self.compact_pane = CompactPane::Request;
         self.request_pane = RequestPane::Body;
         self.request_body_editor()
             .focus_handle(cx)
             .focus(window, cx);
+        if self.response_pane == Pane::Visualizer && Self::compact_layout(window) {
+            self.sync_visualizer(window, cx);
+        }
         cx.notify();
     }
 
@@ -149,6 +159,8 @@ impl Workspace {
         if !self.request_view_visible() || self.request_tabs.is_empty() {
             return;
         }
+        self.compact_sidebar_open = false;
+        self.compact_pane = CompactPane::Response;
         let pane = if self.active().response.is_sending() && self.active().grpc_state.streaming {
             Pane::Messages
         } else {
@@ -156,15 +168,17 @@ impl Workspace {
         };
         self.select_response_pane(pane, window, cx);
         self.focus_response_pane(window, cx);
+        cx.notify();
     }
 
     fn focus_response_pane(&self, window: &mut Window, cx: &mut App) {
         let entry = self.active();
-        let editor_visible = match entry.response {
-            RequestResponse::Finished { .. } => matches!(
-                self.response_pane,
-                Pane::Body | Pane::Headers | Pane::Messages | Pane::Trailers
-            ),
+        let editor_visible = match &entry.response {
+            RequestResponse::Finished { response, .. } => match self.response_pane {
+                Pane::Body => !response.body.is_empty(),
+                Pane::Headers | Pane::Messages | Pane::Trailers => true,
+                _ => false,
+            },
             RequestResponse::Sending { .. } => {
                 entry.grpc_state.streaming
                     && matches!(self.response_pane, Pane::Messages | Pane::Headers)

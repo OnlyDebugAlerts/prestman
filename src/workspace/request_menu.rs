@@ -57,13 +57,6 @@ pub(super) fn build(
     };
     let entry = &view.requests[index];
     let collection_id = entry.collection_id;
-    let export_label = if entry.draft.grpc.is_some() {
-        Some("Export gRPC request")
-    } else if entry.draft.graphql.is_some() {
-        Some("Export GraphQL request")
-    } else {
-        None
-    };
     let has_url = !entry.draft.url.trim().is_empty();
     let can_delete = entry.saved.is_none() || (view.storage.is_ok() && view.team_can_edit());
     let mut destinations = view
@@ -118,13 +111,6 @@ pub(super) fn build(
                 })
         })
     };
-    let menu = if let Some(label) = export_label {
-        menu.item(item(label, &workspace, false, move |view, window, cx| {
-            view.export_request(id, window, cx);
-        }))
-    } else {
-        menu
-    };
     menu.separator()
         .item(make_item("Delete", MenuAction::Delete, !can_delete))
 }
@@ -169,14 +155,6 @@ pub(super) fn build_collection(
                 view.edit_variables(VariableScope::Collection(id), window, cx);
             },
         ))
-        .when(is_root, |menu| {
-            menu.item(item(
-                "Export collection",
-                &workspace,
-                false,
-                move |view, window, cx| view.export_collection(id, window, cx),
-            ))
-        })
         .when(is_root && can_publish, |menu| {
             menu.item(item(
                 "Publish to cloud…",
@@ -239,6 +217,15 @@ fn collection_item(workspace: &WeakEntity<Workspace>, cx: &App) -> PopupMenuItem
     )
 }
 
+fn openapi_item(workspace: &WeakEntity<Workspace>, cx: &App) -> PopupMenuItem {
+    item(
+        "Import Swagger / OpenAPI…",
+        workspace,
+        storage_locked(workspace, cx),
+        |view, window, cx| view.open_api_import(window, cx),
+    )
+}
+
 fn storage_locked(workspace: &WeakEntity<Workspace>, cx: &App) -> bool {
     workspace.upgrade().is_none_or(|view| {
         let view = view.read(cx);
@@ -267,19 +254,7 @@ pub(super) fn build_settings(
         |view, window, cx| view.edit_variables(VariableScope::Environment, window, cx),
     ))
     .separator()
-    .item(item(
-        "Open cloud workspace",
-        &workspace,
-        false,
-        |view, window, cx| view.open_cloud(None, window, cx),
-    ))
-    .separator()
-    .item(item(
-        "Import Swagger / OpenAPI…",
-        &workspace,
-        storage_locked(&workspace, cx),
-        |view, window, cx| view.open_api_import(window, cx),
-    ))
+    .item(openapi_item(&workspace, cx))
     .separator()
     .item(item(
         format!("Check for updates… (v{})", crate::updater::VERSION),
@@ -380,6 +355,7 @@ impl Workspace {
             return;
         }
         if previous_selection == index {
+            self.restore_request_view();
             self.show_selection(window, cx);
         }
         cx.notify();

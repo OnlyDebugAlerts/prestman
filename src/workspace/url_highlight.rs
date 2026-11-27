@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use gpui_kit::{HighlightStyle, component::input::TextDecoration, rgb};
 
+use super::view::{AMBER, AMBER_BG, VIOLET, VIOLET_BG};
 use crate::request::{path_parameter, path_range};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,8 +43,8 @@ pub(super) fn decorations(url: &str) -> Vec<TextDecoration> {
         .into_iter()
         .map(|(range, token)| {
             let (foreground, background) = match token {
-                Token::Variable => (0xf4ac73, 0x34291f),
-                Token::Path => (0xb4a0ff, 0x272039),
+                Token::Variable => (VIOLET, VIOLET_BG),
+                Token::Path => (AMBER, AMBER_BG),
             };
             TextDecoration::new(
                 range,

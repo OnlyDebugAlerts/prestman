@@ -6,6 +6,7 @@ impl Workspace {
     pub(super) fn sync_visualizer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let visible = !self.request_tabs.is_empty()
             && self.response_pane == Pane::Visualizer
+            && (!Self::compact_layout(window) || self.compact_pane == CompactPane::Response)
             && self.variable_editor.is_none()
             && self.openapi_import.is_none()
             && !self.cloud_is_open()

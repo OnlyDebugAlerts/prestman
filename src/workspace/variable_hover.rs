@@ -2,15 +2,16 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     assets::IconName,
     component::{
-        Disableable, ElementExt, Sizable,
+        ActiveTheme, Disableable, ElementExt, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         input::{Escape, Textarea},
     },
 };
 use std::{cell::Cell, ops::Range, rc::Rc, time::Duration};
 
+use super::view::{REQUEST_CONTROL_HEIGHT, VIOLET, VIOLET_BG};
 use super::*;
-use crate::request::{path_parameter, path_range};
+use crate::request::{Pair, path_parameter, path_range};
 
 #[derive(Clone)]
 pub(super) enum VariableField {
@@ -109,6 +110,110 @@ fn spans(text: &str, url: bool) -> Vec<Span> {
     result
 }
 
+fn preview_variable(
+    span: &Span,
+    scopes: &Scopes,
+    path_variables: &[Pair],
+) -> (&'static str, anyhow::Result<String>) {
+    let values = scopes
+        .globals
+        .iter()
+        .chain(&scopes.collection)
+        .chain(&scopes.folder)
+        .chain(&scopes.environment)
+        .cloned();
+    if span.path {
+        let result = path_variables
+            .iter()
+            .find(|row| row.name == span.name && row.enabled)
+            .ok_or_else(|| anyhow::anyhow!("Path variable is missing or disabled"))
+            .and_then(|row| crate::variables::resolve_text(&row.value, values));
+        return ("Path variable", result);
+    }
+    let scope = [
+        ("Environment", &scopes.environment),
+        ("Folder", &scopes.folder),
+        ("Collection", &scopes.collection),
+        ("Globals", &scopes.globals),
+    ]
+    .into_iter()
+    .find(|(_, rows)| {
+        rows.iter()
+            .any(|row| row.enabled && row.name.trim() == span.name)
+    })
+    .map_or("Undefined", |(name, _)| name);
+    let result = crate::variables::resolve_text(&format!("{{{{{}}}}}", span.name), values);
+    (scope, result)
+}
+
+struct UrlVariablePreview {
+    token: String,
+    source: &'static str,
+    value: Entity<TextareaState>,
+    copy_value: Option<String>,
+}
+
+impl UrlVariablePreview {
+    fn render(&self, index: usize, cx: &App) -> impl IntoElement {
+        let copy_label = format!("Copy value of {}", self.token);
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .p_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(self.token.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.source),
+                    )
+                    .children(self.copy_value.as_ref().map(|value| {
+                        let value = value.clone();
+                        Button::new(("copy-url-variable", index))
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Copy)
+                            .accessibility_label(copy_label.clone())
+                            .tooltip(copy_label)
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+                            })
+                    })),
+            )
+            .child(
+                Textarea::new(&self.value)
+                    .small()
+                    .readonly(true)
+                    .appearance(false)
+                    .bordered(false)
+                    .w_full()
+                    .aria_label(format!("{} · {}", self.token, self.source))
+                    .text_color(if self.copy_value.is_some() {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().danger
+                    }),
+            )
+    }
+}
+
 pub(super) struct HoverVariable {
     field: VariableField,
     span: Span,
@@ -123,6 +228,98 @@ pub(super) struct HoverVariable {
 }
 
 impl Workspace {
+    pub(super) fn inspect_url_variables_button(&self, compact: bool, cx: &Context<Self>) -> Button {
+        Button::new("inspect-url-variables")
+            .ghost()
+            .small()
+            .h(REQUEST_CONTROL_HEIGHT)
+            .flex_shrink_0()
+            .bg(rgb(VIOLET_BG))
+            .text_color(rgb(VIOLET))
+            .disabled(!self.request_view_visible())
+            .icon(IconName::Braces)
+            .accessibility_label("Inspect URL variables")
+            .tooltip("Inspect URL variables")
+            .when(compact, |button| button.compact().w(REQUEST_CONTROL_HEIGHT))
+            .when(!compact, |button| button.label("Inspect variables"))
+            .on_click(cx.listener(|view, _, window, cx| view.inspect_url_variables(window, cx)))
+    }
+
+    fn inspect_url_variables(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.request_view_visible()
+            || self.request_tabs.is_empty()
+            || window.has_active_dialog(cx)
+        {
+            return;
+        }
+
+        let url = self.url.read(cx).value();
+        let scopes = self.variable_scopes();
+        let paths = merge_path_variables(&url, &self.active().draft.path_variables);
+        let mut candidates = spans(&url, true);
+        candidates.sort_by_key(|span| span.range.start);
+        let mut seen = HashSet::new();
+        let previews = candidates
+            .into_iter()
+            .filter(|span| seen.insert((span.name.clone(), span.path)))
+            .map(|span| {
+                let (source, result) = preview_variable(&span, &scopes, &paths);
+                let token = url[span.range].to_owned();
+                let copy_value = result.as_ref().ok().cloned();
+                let value = result.unwrap_or_else(|error| error.to_string());
+                UrlVariablePreview {
+                    token,
+                    source,
+                    value: cx.new(|cx| {
+                        TextareaState::new(window, cx)
+                            .auto_grow(1, 4)
+                            .soft_wrap(true)
+                            .placeholder("(empty string)")
+                            .default_value(value)
+                    }),
+                    copy_value,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        self.variable_hover = None;
+        let workspace = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let workspace = workspace.clone();
+            dialog
+                .title("URL variables")
+                .width(px(520.))
+                .on_close(move |_, window, cx| {
+                    let workspace = workspace.clone();
+                    window.defer(cx, move |window, cx| {
+                        let _ = workspace.update(cx, |view, cx| view.sync_visualizer(window, cx));
+                    });
+                })
+                .child(
+                    div()
+                        .id("url-variable-previews")
+                        .flex()
+                        .flex_col()
+                        .max_h(px(320.))
+                        .overflow_y_scroll()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if previews.is_empty() {
+                                    "This URL has no variables. Use {{name}} for a workspace variable or :name for a path variable."
+                                } else {
+                                    "Values are shown before pre-request scripts run."
+                                }),
+                        )
+                        .children(previews.iter().enumerate().map(|(index, preview)| preview.render(index, cx))),
+                )
+        });
+        self.sync_visualizer(window, cx);
+        cx.notify();
+    }
+
     fn hover_popup_focused(&self, window: &Window, cx: &App) -> bool {
         self.variable_hover
             .as_ref()
@@ -355,48 +552,8 @@ impl Workspace {
                 }
             }
         }
-        let all = scopes
-            .globals
-            .iter()
-            .chain(&scopes.collection)
-            .chain(&scopes.folder)
-            .chain(&scopes.environment)
-            .cloned()
-            .collect::<Vec<_>>();
-        let (scope, result) = if hover.span.path {
-            (
-                "Path variable",
-                self.active()
-                    .draft
-                    .path_variables
-                    .iter()
-                    .find(|row| row.name == hover.span.name && row.enabled)
-                    .ok_or_else(|| anyhow::anyhow!("Path variable is missing or disabled"))
-                    .and_then(|row| {
-                        crate::variables::resolve_text(&row.value, all.clone().into_iter())
-                    }),
-            )
-        } else {
-            let scope = [
-                ("Environment", &scopes.environment),
-                ("Folder", &scopes.folder),
-                ("Collection", &scopes.collection),
-                ("Globals", &scopes.globals),
-            ]
-            .into_iter()
-            .find(|(_, rows)| {
-                rows.iter()
-                    .any(|row| row.enabled && row.name == hover.span.name)
-            })
-            .map_or("Undefined", |(name, _)| name);
-            (
-                scope,
-                crate::variables::resolve_text(
-                    &format!("{{{{{}}}}}", hover.span.name),
-                    all.into_iter(),
-                ),
-            )
-        };
+        let (scope, result) =
+            preview_variable(&hover.span, &scopes, &self.active().draft.path_variables);
         let failed = result.is_err();
         let value = result.unwrap_or_else(|error| error.to_string());
         let copy_value = value.clone();
@@ -532,7 +689,9 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::spans;
+    use super::{Scopes, Variable, preview_variable, spans};
+    use crate::request::Pair;
+
     #[test]
     fn hover_spans_ignore_url_ports_and_query_colons_and_keep_utf8_offsets() {
         let text = "{{хост}}:8080/themes/:id?value={{ токен }}&other=:no#/:no";
@@ -547,5 +706,44 @@ mod tests {
         );
         assert_eq!(&text[parsed[2].range.clone()], ":id");
         assert_eq!(spans(text, false).len(), 2);
+    }
+
+    #[test]
+    fn preview_matches_variable_precedence_and_reports_nested_failures() {
+        let variable = |name: &str, value: &str| Variable {
+            name: name.into(),
+            value: value.into(),
+            ..Variable::default()
+        };
+        let scopes = Scopes {
+            globals: vec![variable("base", "https://example.test")],
+            folder: vec![variable("base", "https://folder.example.test")],
+            environment: vec![
+                variable("base", "https://env.example.test"),
+                variable("cycle", "{{cycle}}"),
+            ],
+            ..Scopes::default()
+        };
+        let paths = [Pair {
+            name: "id".into(),
+            value: "{{base}}".into(),
+            ..Pair::default()
+        }];
+        let template = spans(
+            "{{base}}/users/:id?cycle={{cycle}}&missing={{missing}}",
+            true,
+        );
+        let (scope, value) = preview_variable(&template[0], &scopes, &paths);
+        assert_eq!(scope, "Environment");
+        assert_eq!(value.unwrap(), "https://env.example.test");
+        let (scope, value) = preview_variable(&template[1], &scopes, &paths);
+        assert_eq!(scope, "Environment");
+        assert!(value.unwrap_err().to_string().contains("Circular"));
+        let (scope, value) = preview_variable(&template[2], &scopes, &paths);
+        assert_eq!(scope, "Undefined");
+        assert!(value.unwrap_err().to_string().contains("{{missing}}"));
+        let (scope, value) = preview_variable(&template[3], &scopes, &paths);
+        assert_eq!(scope, "Path variable");
+        assert_eq!(value.unwrap(), "https://env.example.test");
     }
 }

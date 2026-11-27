@@ -16,7 +16,11 @@ assets::icon_assets!(
         Layers,
         Server,
         User,
-        UserPlus
+        UserPlus,
+        Users,
+        Braces,
+        Monitor,
+        PanelTop
     ]
 );
 
@@ -27,6 +31,11 @@ impl AssetSource for AppAssets {
         if path == "prestman-logo.png" {
             return Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/prestman-logo.png"
+            ))));
+        }
+        if path == "prestman-mark.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/prestman-mark.svg"
             ))));
         }
         if let Some(icon) = ExtraIcons.load(path)? {
@@ -40,6 +49,9 @@ impl AssetSource for AppAssets {
         paths.extend(ExtraIcons.list(path)?);
         if "prestman-logo.png".starts_with(path) {
             paths.push("prestman-logo.png".into());
+        }
+        if "prestman-mark.svg".starts_with(path) {
+            paths.push("prestman-mark.svg".into());
         }
         Ok(paths)
     }
@@ -64,6 +76,10 @@ mod tests {
             assets::IconName::Server,
             assets::IconName::User,
             assets::IconName::UserPlus,
+            assets::IconName::Users,
+            assets::IconName::Braces,
+            assets::IconName::Monitor,
+            assets::IconName::PanelTop,
             assets::IconName::ArrowLeft,
             assets::IconName::RefreshCw,
             assets::IconName::SquareTerminal,
@@ -75,6 +91,7 @@ mod tests {
             assert!(AppAssets.load(&name.path())?.is_some());
         }
         assert!(AppAssets.load("prestman-logo.png")?.is_some());
+        assert!(AppAssets.load("prestman-mark.svg")?.is_some());
         Ok(())
     }
 }
