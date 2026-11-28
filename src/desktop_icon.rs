@@ -1,41 +1,33 @@
 //! AppKit integration uses the GPUI main-thread event loop.
 use anyhow::{Context as _, Result};
 use gpui_kit::{App, Global};
-use objc2::{ClassType, DeclaredClass, declare_class, msg_send_id, mutability, rc::Retained, sel};
+use objc2::{
+    AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, sel,
+};
 use objc2_app_kit::{NSApplication, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem};
-use objc2_foundation::{MainThreadMarker, NSData, NSObject, NSObjectProtocol, NSSize, NSString};
+use objc2_foundation::{NSData, NSObject, NSObjectProtocol, NSSize, NSString};
 
-declare_class!(
-    struct TrayActions;
-
+define_class!(
     // NSObject has no subclassing requirements; AppKit actions run on the main thread.
-    unsafe impl ClassType for TrayActions {
-        type Super = NSObject;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "PrestmanTrayActions";
-    }
-
-    impl DeclaredClass for TrayActions {
-        type Ivars = ();
-    }
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PrestmanTrayActions"]
+    struct TrayActions;
 
     unsafe impl NSObjectProtocol for TrayActions {}
 
-    unsafe impl TrayActions {
-        #[method(showPrestman:)]
+    impl TrayActions {
+        #[unsafe(method(showPrestman:))]
         fn show(&self, _sender: &NSObject) {
-            let mtm = MainThreadMarker::new().expect("AppKit actions run on the main thread");
-            let app = NSApplication::sharedApplication(mtm);
+            let app = NSApplication::sharedApplication(self.mtm());
             #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
             // Restore the existing GPUI window, including when it is minimized.
-            unsafe {
-                let windows = app.windows();
-                for index in 0..windows.count() {
-                    let window = windows.objectAtIndex(index);
-                    window.deminiaturize(None);
-                    window.makeKeyAndOrderFront(None);
-                }
+            let windows = app.windows();
+            for index in 0..windows.count() {
+                let window = windows.objectAtIndex(index);
+                window.deminiaturize(None);
+                window.makeKeyAndOrderFront(None);
             }
         }
     }
@@ -51,7 +43,7 @@ impl Global for DesktopIcon {}
 impl Drop for DesktopIcon {
     fn drop(&mut self) {
         // GPUI globals are destroyed on the main thread, while AppKit is still alive.
-        unsafe { NSStatusBar::systemStatusBar().removeStatusItem(&self.item) };
+        NSStatusBar::systemStatusBar().removeStatusItem(&self.item);
     }
 }
 
@@ -70,7 +62,7 @@ pub fn init(cx: &mut App) -> Result<()> {
         app.setApplicationIconImage(Some(&logo));
         tray_logo.setSize(NSSize::new(22., 22.));
         let actions = mtm.alloc::<TrayActions>().set_ivars(());
-        let actions: Retained<TrayActions> = msg_send_id![super(actions), init];
+        let actions: Retained<TrayActions> = msg_send![super(actions), init];
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(30.);
         let button = item
             .button(mtm)

@@ -162,6 +162,29 @@ impl Workspace {
         self.cloud.mounted.is_some()
     }
 
+    pub(super) fn team_history_path(&self) -> Option<PathBuf> {
+        Some(
+            self.cloud
+                .mounted
+                .as_ref()?
+                .path
+                .with_extension("history.json"),
+        )
+    }
+
+    pub(super) fn team_history_group(&self, id: usize) -> Option<Uuid> {
+        self.cloud.mounted.as_ref()?.group_ids.get(&id).copied()
+    }
+
+    pub(super) fn resolve_team_history_group(&self, key: Uuid) -> Option<usize> {
+        self.cloud
+            .mounted
+            .as_ref()?
+            .group_ids
+            .iter()
+            .find_map(|(&id, &value)| (value == key).then_some(id))
+    }
+
     pub(super) fn team_can_edit(&self) -> bool {
         self.cloud
             .mounted
@@ -841,6 +864,7 @@ impl Workspace {
             compare: None,
         });
         self.reset_team_view();
+        self.load_workspace_history(window, cx);
         self.refresh_team_projection(true, window, cx);
         self.close_cloud(window, cx);
         self.start_team_sync(generation, window, cx);
@@ -884,6 +908,7 @@ impl Workspace {
         self.collapsed_collections = local.collapsed;
         self.selected = local.selected;
         self.reset_team_view();
+        self.load_workspace_history(window, cx);
         self.restore_request_view();
         self.restore_selection(window, cx);
         Ok(())

@@ -8,6 +8,9 @@ assets::icon_assets!(
         ListFilter,
         Code,
         Library,
+        Clock,
+        FlaskConical,
+        Terminal,
         Copy,
         Lock,
         LockOpen,
@@ -62,11 +65,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundles_variable_icon_and_default_component_icons() -> anyhow::Result<()> {
+    fn bundles_workspace_icons() -> anyhow::Result<()> {
         for name in [
             assets::IconName::ListFilter,
             assets::IconName::Code,
             assets::IconName::Library,
+            assets::IconName::Clock,
+            assets::IconName::FlaskConical,
+            assets::IconName::Terminal,
+            assets::IconName::PanelLeft,
             assets::IconName::Copy,
             assets::IconName::Lock,
             assets::IconName::LockOpen,

@@ -415,6 +415,7 @@ impl Workspace {
         };
         let (finished, completion) = oneshot::channel();
         let collection_id = scopes.collection_id;
+        self.record_history(&draft);
         let worker = thread::Builder::new()
             .name("prestman-grpc".into())
             .spawn(move || {

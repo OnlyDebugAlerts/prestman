@@ -175,6 +175,7 @@ impl Workspace {
     }
 
     pub(super) fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.history.visible = false;
         self.sidebar_cursor = self.active_sidebar_target();
         self.initialize_sidebar_cursor(cx);
         self.sidebar_focus.focus(window, cx);

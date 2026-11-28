@@ -12,7 +12,7 @@ enum MenuAction {
     Delete,
 }
 
-fn item(
+pub(super) fn item(
     label: impl Into<SharedString>,
     workspace: &WeakEntity<Workspace>,
     disabled: bool,

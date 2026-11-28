@@ -6,6 +6,7 @@ mod collections;
 mod curl;
 mod graphql;
 mod grpc;
+mod history;
 mod navigation;
 mod pairs;
 mod request_menu;
@@ -237,12 +238,15 @@ pub struct Workspace {
     request_tabs: Vec<usize>,
     request_tabs_scroll: ScrollHandle,
     sidebar_width: Pixels,
+    request_pane_fraction: f32,
+    variables_width: Pixels,
     compact_sidebar_open: bool,
     compact_pane: CompactPane,
     last_compact_layout: bool,
     sidebar_focus: FocusHandle,
     sidebar_scroll: ScrollHandle,
     sidebar_cursor: Option<SidebarTarget>,
+    history: history::HistoryPanel,
     name: Entity<InputState>,
     request_rename: Option<RequestRename>,
     url: Entity<TextareaState>,
@@ -275,6 +279,7 @@ impl Workspace {
             Ok((storage, snapshot)) => (Ok(storage), snapshot),
             Err(error) => (Err(format!("{error:#}")), Default::default()),
         };
+        let history = history::HistoryPanel::new(storage.as_ref().ok(), window, cx);
         let mut requests = snapshot
             .requests
             .into_iter()
@@ -291,9 +296,10 @@ impl Workspace {
         let next_collection_id = snapshot
             .collections
             .iter()
-            .map(|item| item.id + 1)
+            .map(|item| item.id)
+            .chain(history.local_collection_ids())
             .max()
-            .unwrap_or_default();
+            .map_or(0, |id| id.saturating_add(1));
         let (request_tabs, selected) = snapshot
             .sidebar
             .restore_request_tabs(|&index| (index < requests.len()).then_some(index));
@@ -487,12 +493,15 @@ impl Workspace {
             request_tabs,
             request_tabs_scroll: ScrollHandle::new(),
             sidebar_width: px(234.),
+            request_pane_fraction: 0.5,
+            variables_width: px(420.),
             compact_sidebar_open: false,
             compact_pane: CompactPane::Request,
             last_compact_layout: Self::compact_layout(window),
             sidebar_focus,
             sidebar_scroll: ScrollHandle::new(),
             sidebar_cursor: None,
+            history,
             name,
             request_rename: None,
             url,
@@ -531,7 +540,15 @@ impl Workspace {
 
     fn focus_url(&self, window: &mut Window, cx: &mut App) {
         if self.request_tabs.is_empty() {
-            self.sidebar_focus.focus(window, cx);
+            if self.history.visible {
+                self.history
+                    .filter
+                    .read(cx)
+                    .focus_handle(cx)
+                    .focus(window, cx);
+            } else {
+                self.sidebar_focus.focus(window, cx);
+            }
         } else {
             self.url.read(cx).focus_handle(cx).focus(window, cx);
         }
@@ -1131,6 +1148,7 @@ impl Workspace {
         };
         let id = self.active().id;
         let request = self.active().draft.clone();
+        self.record_history(&request);
         let scripted = !request.pre_request_script.trim().is_empty()
             || !request.post_response_script.trim().is_empty();
         let scopes = self.variable_scopes();

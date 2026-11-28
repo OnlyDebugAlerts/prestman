@@ -215,6 +215,10 @@ impl Storage {
             .join(format!("{workspace}.json"))
     }
 
+    pub(crate) fn history_path(&self) -> PathBuf {
+        self.directory.join("history.json")
+    }
+
     pub(crate) fn load_active_cloud_workspace(&self) -> Result<Option<SavedCloudWorkspace>> {
         let file = match File::open(self.directory.join("active-cloud-workspace.json")) {
             Ok(file) => file,
@@ -335,7 +339,7 @@ impl CloudSessionStore {
     }
 }
 
-fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let directory = path.parent().context("Missing data directory")?;
     let mut file = NamedTempFile::new_in(directory)
         .with_context(|| format!("Could not create a temporary file for {}", path.display()))?;

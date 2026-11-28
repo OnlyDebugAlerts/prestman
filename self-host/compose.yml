@@ -20,7 +20,7 @@ services:
     networks: [backend]
 
   auth:
-    image: supabase/gotrue:v2.197.0
+    image: supabase/gotrue:v2.199.0
     restart: unless-stopped
     depends_on:
       db:
@@ -65,7 +65,7 @@ services:
     networks: [backend]
 
   rest:
-    image: postgrest/postgrest:v14.18
+    image: postgrest/postgrest:v16.6
     restart: unless-stopped
     depends_on:
       migrate:
@@ -85,7 +85,7 @@ services:
     networks: [backend]
 
   gateway:
-    image: nginx:1.30.7-alpine
+    image: nginx:1.30.8-alpine
     restart: unless-stopped
     depends_on:
       auth:

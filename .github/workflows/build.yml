@@ -20,7 +20,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       MACOSX_DEPLOYMENT_TARGET: '15.0'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - name: Install Linux system libraries
         if: runner.os == 'Linux'
         run: |

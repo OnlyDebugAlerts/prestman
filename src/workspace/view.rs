@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    Disableable, Icon, Sizable, Theme, ThemeMode, TitleBar,
+    Disableable, Icon, Selectable, Sizable, Theme, ThemeMode, TitleBar,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     input::{Editor, Enter, Escape, Input, Textarea},
@@ -53,12 +53,22 @@ const SIDEBAR_ROW_PADDING: f32 = 5.;
 const SIDEBAR_ITEM_GAP: f32 = 5.;
 const SIDEBAR_COLLECTION_INDENT: f32 = 10.;
 const SIDEBAR_METHOD_WIDTH: f32 = 46.;
-const SIDEBAR_DIVIDER_WIDTH: Pixels = px(6.);
+const DIVIDER_WIDTH: Pixels = px(6.);
 const MIN_SIDEBAR_WIDTH: Pixels = px(180.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(480.);
 const MIN_WORKBENCH_WIDTH: Pixels = px(600.);
+const MIN_EDITOR_WIDTH: Pixels = px(240.);
+const MIN_VARIABLES_WIDTH: Pixels = px(260.);
 
-struct SidebarResize {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ColumnSplit {
+    Sidebar,
+    RequestResponse,
+    RequestVariables,
+}
+
+struct ColumnResize {
+    split: ColumnSplit,
     origin: Cell<Pixels>,
 }
 
@@ -234,7 +244,12 @@ impl Render for Workspace {
                     .min_h_0()
                     .when(show_sidebar, |area| {
                         area.child(self.sidebar(window, cx))
-                            .child(self.sidebar_divider(window, cx))
+                            .child(self.column_divider(
+                                ColumnSplit::Sidebar,
+                                self.sidebar_width(window),
+                                window.viewport_size().width - DIVIDER_WIDTH,
+                                cx,
+                            ))
                     })
                     .child(self.main_panel(compact, window, cx)),
             )
@@ -289,8 +304,7 @@ impl Workspace {
                     .h(REQUEST_CONTROL_HEIGHT)
                     .icon(IconName::Search)
                     .label("Search requests")
-                    .child(shortcut_hint("K"))
-                    .tooltip_with_action("Search requests", &FindRequest, Some(WORKSPACE_CONTEXT))
+                    .tooltip("Search requests")
                     .on_click(
                         cx.listener(|this, _, window, cx| this.open_request_finder(window, cx)),
                     ),
@@ -330,24 +344,35 @@ impl Workspace {
                             .child(error.clone())
                     }),
             )
-            .child(self.workbench_content(compact, cx))
+            .child(self.workbench_content(compact, window, cx))
     }
 
-    fn workbench_content(&self, compact: bool, cx: &Context<Self>) -> Div {
+    fn workbench_content(&self, compact: bool, window: &Window, cx: &Context<Self>) -> Div {
+        let available =
+            window.viewport_size().width - self.sidebar_width(window) - DIVIDER_WIDTH * 2.;
         if self.variable_editor.is_some() {
             if compact || self.request_tabs.is_empty() {
                 return column().flex_1().min_h_0().child(self.variables_editor(cx));
             }
+            let variables_width = self
+                .variables_width
+                .clamp(MIN_VARIABLES_WIDTH, available - MIN_EDITOR_WIDTH);
             return div()
                 .flex()
                 .flex_1()
                 .min_h_0()
                 .min_w_0()
                 .child(self.request_editor(false, cx))
+                .child(self.column_divider(
+                    ColumnSplit::RequestVariables,
+                    available - variables_width,
+                    available,
+                    cx,
+                ))
                 .child(
                     self.variables_editor(cx)
                         .flex_none()
-                        .w(px(420.))
+                        .w(variables_width)
                         .bg(rgb(SIDEBAR)),
                 );
         }
@@ -361,7 +386,7 @@ impl Workspace {
                 Button::new("find-empty-request")
                     .primary()
                     .label("Search requests")
-                    .tooltip_with_action("Search requests", &FindRequest, Some(WORKSPACE_CONTEXT))
+                    .tooltip("Search requests")
                     .on_click(
                         cx.listener(|this, _, window, cx| this.open_request_finder(window, cx)),
                     ),
@@ -379,12 +404,15 @@ impl Workspace {
                     |area| area.child(self.response_view(cx)),
                 );
         }
+        let request_width = (available * self.request_pane_fraction)
+            .clamp(MIN_EDITOR_WIDTH, available - MIN_EDITOR_WIDTH);
         div()
             .flex()
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .child(self.request_editor(false, cx))
+            .child(self.request_editor(false, cx).flex_none().w(request_width))
+            .child(self.column_divider(ColumnSplit::RequestResponse, request_width, available, cx))
             .child(self.response_view(cx))
     }
 
@@ -446,10 +474,10 @@ impl Workspace {
                         .small()
                         .compact()
                         .flex_shrink_0()
-                        .icon(IconName::Library)
-                        .label("Collections")
+                        .icon(IconName::PanelLeft)
+                        .accessibility_label("Toggle sidebar")
                         .toggled(self.compact_sidebar_open)
-                        .tooltip_with_action("Collections", &FocusRequests, Some(WORKSPACE_CONTEXT))
+                        .tooltip("Toggle sidebar")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.compact_sidebar_open = !this.compact_sidebar_open;
                             if this.compact_sidebar_open {
@@ -504,7 +532,7 @@ impl Workspace {
                     .flex_shrink_0()
                     .icon(IconName::Plus)
                     .accessibility_label("New request tab")
-                    .tooltip_with_action("New request tab", &NewRequest, Some(WORKSPACE_CONTEXT))
+                    .tooltip("New request tab")
                     .on_click(cx.listener(|this, _, window, cx| this.new_request(window, cx))),
             )
     }
@@ -597,17 +625,7 @@ impl Workspace {
                             .flex_shrink_0()
                             .icon(IconName::Close)
                             .accessibility_label(format!("Close {title}"))
-                            .when_else(
-                                active,
-                                |button| {
-                                    button.tooltip_with_action(
-                                        "Close tab",
-                                        &CloseRequestTab,
-                                        Some(WORKSPACE_CONTEXT),
-                                    )
-                                },
-                                |button| button.tooltip("Close tab"),
-                            )
+                            .tooltip("Close tab")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.close_request_tab(id, window, cx);
                             })),
@@ -641,62 +659,94 @@ impl Workspace {
     }
 
     fn sidebar_width(&self, window: &Window) -> Pixels {
-        Self::clamp_sidebar_width(self.sidebar_width, window)
+        Self::clamp_sidebar_width(self.sidebar_width, window.viewport_size().width - DIVIDER_WIDTH)
     }
 
-    fn clamp_sidebar_width(width: Pixels, window: &Window) -> Pixels {
-        let max = (window.viewport_size().width - MIN_WORKBENCH_WIDTH - SIDEBAR_DIVIDER_WIDTH)
-            .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+    fn clamp_sidebar_width(width: Pixels, available: Pixels) -> Pixels {
+        let max = (available - MIN_WORKBENCH_WIDTH).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
         width.clamp(MIN_SIDEBAR_WIDTH, max)
     }
 
-    fn resize_sidebar(&mut self, width: Pixels, window: &Window, cx: &mut Context<Self>) {
-        let width = Self::clamp_sidebar_width(width, window);
-        if self.sidebar_width != width {
-            self.sidebar_width = width;
+    fn resize_columns(
+        &mut self,
+        split: ColumnSplit,
+        left_width: Pixels,
+        available: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match split {
+            ColumnSplit::Sidebar => {
+                let width = Self::clamp_sidebar_width(left_width, available);
+                std::mem::replace(&mut self.sidebar_width, width) != width
+            }
+            ColumnSplit::RequestResponse => {
+                let width = left_width.clamp(MIN_EDITOR_WIDTH, available - MIN_EDITOR_WIDTH);
+                let fraction = width / available;
+                std::mem::replace(&mut self.request_pane_fraction, fraction) != fraction
+            }
+            ColumnSplit::RequestVariables => {
+                let width = (available - left_width)
+                    .clamp(MIN_VARIABLES_WIDTH, available - MIN_EDITOR_WIDTH);
+                std::mem::replace(&mut self.variables_width, width) != width
+            }
+        };
+        if changed {
             cx.notify();
         }
     }
 
-    fn sidebar_divider(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+    fn column_divider(
+        &self,
+        split: ColumnSplit,
+        left_width: Pixels,
+        available: Pixels,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let workspace = cx.entity().downgrade();
-        let width = self.sidebar_width(window);
+        let (id, label) = match split {
+            ColumnSplit::Sidebar => ("sidebar-divider", "Resize sidebar"),
+            ColumnSplit::RequestResponse => {
+                ("request-response-divider", "Resize request and response")
+            }
+            ColumnSplit::RequestVariables => {
+                ("request-variables-divider", "Resize request and variables")
+            }
+        };
         div()
-            .id("sidebar-divider")
+            .id(id)
             .role(Role::Splitter)
-            .aria_label("Resize sidebar")
+            .aria_label(label)
             .flex()
             .justify_center()
             .h_full()
-            .w(SIDEBAR_DIVIDER_WIDTH)
+            .w(DIVIDER_WIDTH)
             .flex_shrink_0()
             .cursor_col_resize()
             .bg(rgb(SIDEBAR))
             .hover(|style| style.bg(rgb(SELECTED)))
             .child(div().h_full().w(px(1.)).bg(rgb(BORDER)))
             .on_drag(
-                SidebarResize {
+                ColumnResize {
+                    split,
                     origin: Cell::new(px(0.)),
                 },
                 move |drag, offset, window, cx| {
-                    let origin = window.mouse_position().x - offset.x - width;
+                    let width = left_width + offset.x - DIVIDER_WIDTH / 2.;
+                    let origin = window.mouse_position().x - width;
                     drag.origin.set(origin);
                     let _ = workspace.update(cx, |this, cx| {
-                        this.resize_sidebar(
-                            width + offset.x - SIDEBAR_DIVIDER_WIDTH / 2.,
-                            window,
-                            cx,
-                        );
+                        this.resize_columns(split, width, available, cx);
                     });
                     cx.new(|_| Empty)
                 },
             )
             .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<SidebarResize>, window, cx| {
-                    let width = event.event.position.x
-                        - event.drag(cx).origin.get()
-                        - SIDEBAR_DIVIDER_WIDTH / 2.;
-                    this.resize_sidebar(width, window, cx);
+                cx.listener(move |this, event: &DragMoveEvent<ColumnResize>, _, cx| {
+                    let drag = event.drag(cx);
+                    if drag.split == split {
+                        let width = event.event.position.x - drag.origin.get();
+                        this.resize_columns(split, width, available, cx);
+                    }
                 }),
             )
     }
@@ -705,7 +755,8 @@ impl Workspace {
         let workspace = cx.entity().downgrade();
         let settings_workspace = workspace.clone();
         let add_workspace = workspace.clone();
-        column()
+        let history = self.history.visible;
+        let sidebar = column()
             .id("sidebar")
             .w(self.sidebar_width(window))
             .flex_shrink_0()
@@ -718,59 +769,75 @@ impl Workspace {
                     .px_2()
                     .gap_1()
                     .flex_shrink_0()
-                    .child(section_label("Collections"))
+                    .children(
+                        [
+                            ("sidebar-collections", "Collections", IconName::Library, false),
+                            ("sidebar-history", "History", IconName::Clock, true),
+                        ]
+                        .map(|(id, label, icon, show)| {
+                            pane_icon_button(id, label, icon, history == show)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.show_history(show, window, cx);
+                                }))
+                        }),
+                    )
                     .child(div().flex_1())
-                    .child(
-                        Button::new("add-sidebar-item")
-                            .ghost()
-                            .compact()
-                            .small()
-                            .icon(IconName::Plus)
-                            .accessibility_label("New request or collection")
-                            .disabled(self.cloud_is_open())
-                            .dropdown_caret(false)
-                            .tooltip("New request or collection")
-                            .dropdown_menu(move |menu, _, cx| {
-                                request_menu::build_add(menu, add_workspace.clone(), cx)
-                            }),
-                    ),
+                    .when(!history, |header| {
+                        header.child(
+                            Button::new("add-sidebar-item")
+                                .ghost()
+                                .compact()
+                                .small()
+                                .icon(IconName::Plus)
+                                .accessibility_label("New request or collection")
+                                .disabled(self.cloud_is_open())
+                                .dropdown_caret(false)
+                                .tooltip("New request or collection")
+                                .dropdown_menu(move |menu, _, cx| {
+                                    request_menu::build_add(menu, add_workspace.clone(), cx)
+                                }),
+                        )
+                    }),
             )
-            .child(
-                column()
-                    .id("requests")
-                    .flex_1()
-                    .min_h_0()
-                    .mx_2()
-                    .px_1()
-                    .py_1()
-                    .gap(px(SIDEBAR_ROW_GAP))
-                    .role(Role::Tree)
-                    .aria_label("Collections and requests")
-                    .key_context(SIDEBAR_CONTEXT)
-                    .track_focus(&self.sidebar_focus)
-                    .on_action(cx.listener(|this, action: &SidebarNavigate, window, cx| {
-                        this.navigate_sidebar(*action, window, cx);
-                    }))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.sidebar_scroll)
-                    .children(self.sidebar_rows().into_iter().map(|item| {
-                        match item {
-                            SidebarRow::Collection(index) => {
-                                self.collection_row(index, window, cx).into_any_element()
+            .when(history, |sidebar| sidebar.child(self.history_sidebar(cx)))
+            .when(!history, |sidebar| {
+                sidebar.child(
+                    column()
+                        .id("requests")
+                        .flex_1()
+                        .min_h_0()
+                        .mx_2()
+                        .px_1()
+                        .py_1()
+                        .gap(px(SIDEBAR_ROW_GAP))
+                        .role(Role::Tree)
+                        .aria_label("Collections and requests")
+                        .key_context(SIDEBAR_CONTEXT)
+                        .track_focus(&self.sidebar_focus)
+                        .on_action(cx.listener(|this, action: &SidebarNavigate, window, cx| {
+                            this.navigate_sidebar(*action, window, cx);
+                        }))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.sidebar_scroll)
+                        .children(self.sidebar_rows().into_iter().map(|item| {
+                            match item {
+                                SidebarRow::Collection(index) => {
+                                    self.collection_row(index, window, cx).into_any_element()
+                                }
+                                SidebarRow::Edit => self
+                                    .collection_form(
+                                        self.collection_edit.expect("sidebar form is open"),
+                                        cx,
+                                    )
+                                    .into_any_element(),
+                                SidebarRow::Ungrouped => self.ungrouped_row(cx).into_any_element(),
+                                SidebarRow::Request(index) => {
+                                    self.request_row(index, window, cx).into_any_element()
+                                }
                             }
-                            SidebarRow::Edit => self
-                                .collection_form(
-                                    self.collection_edit.expect("sidebar form is open"),
-                                    cx,
-                                )
-                                .into_any_element(),
-                            SidebarRow::Ungrouped => self.ungrouped_row(cx).into_any_element(),
-                            SidebarRow::Request(index) => {
-                                self.request_row(index, window, cx).into_any_element()
-                            }
-                        }
-                    })),
-            )
+                        })),
+                )
+            })
             .child(
                 column()
                     .px_2()
@@ -797,10 +864,16 @@ impl Workspace {
                                 request_menu::build_settings(menu, settings_workspace.clone(), cx)
                             }),
                     ),
-            )
-            .context_menu(move |menu, window, cx| {
-                request_menu::build_sidebar(menu, workspace.clone(), window, cx)
-            })
+            );
+        if history {
+            sidebar.into_any_element()
+        } else {
+            sidebar
+                .context_menu(move |menu, window, cx| {
+                    request_menu::build_sidebar(menu, workspace.clone(), window, cx)
+                })
+                .into_any_element()
+        }
     }
 
     fn openapi_import_panel(
@@ -1190,14 +1263,6 @@ impl Workspace {
     fn request_identity(&self, compact: bool) -> Div {
         let entry = self.active();
         let clean = self.viewer_draft_saved(entry) || !entry.is_dirty();
-        let save_status = if !clean {
-            Some(status_badge("Unsaved changes", AMBER, AMBER_BG))
-        } else if self.in_team() && self.team_can_edit() {
-            // The team banner reports whether the saved snapshot has synced.
-            Some(status_badge("Saved", MUTED, RAISED))
-        } else {
-            None
-        };
         row()
             .min_w_0()
             .gap_2()
@@ -1209,25 +1274,9 @@ impl Workspace {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(entry.draft.title().to_owned()),
             )
-            .children(save_status.map(|badge| badge.flex_shrink_0()))
-    }
-
-    fn save_request_button(&self, cx: &Context<Self>) -> Button {
-        let viewer = self.in_team() && !self.team_can_edit();
-        let label = if viewer { "Save local draft" } else { "Save" };
-        Button::new("save-request")
-            .outline()
-            .small()
-            .flex_shrink_0()
-            .h(REQUEST_CONTROL_HEIGHT)
-            .label(label)
-            .tooltip_with_action(label, &SaveRequest, Some(WORKSPACE_CONTEXT))
-            .disabled(
-                !self.active().is_dirty()
-                    || self.viewer_draft_saved(self.active())
-                    || self.storage.is_err(),
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.save_request(cx)))
+            .when(clean && self.in_team() && self.team_can_edit(), |row| {
+                row.child(status_badge("Saved", MUTED, RAISED).flex_shrink_0())
+            })
     }
 
     fn toolbar(&self, compact: bool, window: &Window, cx: &Context<Self>) -> Div {
@@ -1388,7 +1437,6 @@ impl Workspace {
                             ),
                     )
                     .child(self.inspect_url_variables_button(compact, cx))
-                    .child(self.save_request_button(cx))
                     .child(
                         Button::new("send-request")
                             .primary()
@@ -1397,24 +1445,12 @@ impl Workspace {
                             .h(REQUEST_CONTROL_HEIGHT)
                             .label(if sending { "Sending…" } else { "Send" })
                             .disabled(sending || self.variable_editor.is_some())
-                            .tooltip_with_action(
-                                "Send request",
-                                &SendRequest,
-                                Some(WORKSPACE_CONTEXT),
-                            )
+                            .tooltip("Send request")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.send_request(window, cx)),
                             ),
                     ),
             )
-            .when(!graphql && entry.draft.url.is_empty() && !compact, |bar| {
-                bar.child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(FAINT))
-                        .child("Paste a URL or a cURL command."),
-                )
-            })
     }
 
     fn grpc_toolbar(&self, cx: &Context<Self>) -> Div {
@@ -1518,7 +1554,6 @@ impl Workspace {
                                     .disabled(run.is_some() || !has_methods),
                             ),
                     )
-                    .child(self.save_request_button(cx))
                     .child(
                         Button::new("grpc-invoke")
                             .primary()
@@ -1690,7 +1725,7 @@ impl Workspace {
             )
     }
 
-    fn request_editor(&self, compact: bool, cx: &Context<Self>) -> impl IntoElement {
+    fn request_editor(&self, compact: bool, cx: &Context<Self>) -> Div {
         let grpc = self.active().draft.grpc.is_some();
         let graphql = self.active().draft.graphql.is_some();
         let tabs = [
@@ -1737,14 +1772,12 @@ impl Workspace {
             .min_w_0()
             .min_h_0()
             .when(!compact, |panel| {
-                panel.border_r_1().border_color(rgb(BORDER)).child(
+                panel.child(
                     row()
                         .h(PANE_BAR_HEIGHT)
                         .px_2()
                         .flex_shrink_0()
-                        .child(section_label("Request"))
-                        .child(div().flex_1())
-                        .child(shortcut_hint("2")),
+                        .child(section_label("Request")),
                 )
             })
             .child(
@@ -2373,8 +2406,6 @@ impl Workspace {
                 received || live,
             )),
             grpc.then_some(("grpc-trailers", "Trailers", Pane::Trailers, received)),
-            Some(("response-tests", "Tests", Pane::Tests, true)),
-            Some(("response-console", "Console", Pane::Console, true)),
             Some((
                 "response-visualizer",
                 "Visualizer",
@@ -2395,8 +2426,7 @@ impl Workspace {
                 row().h(PANE_BAR_HEIGHT).px_2().gap_1p5().flex_shrink_0()
                     .child(section_label("Response"))
                     .child(div().flex_1())
-                    .children(finished.map(|response| response_metadata(response, grpc)))
-                    .child(shortcut_hint("3")),
+                    .children(finished.map(|response| response_metadata(response, grpc))),
             )
             .child(
                 row()
@@ -2480,6 +2510,27 @@ impl Workspace {
                         })),
                     ),
             })
+            .child(
+                row()
+                    .h(PANE_BAR_HEIGHT)
+                    .px_2()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .children(
+                        [
+                            ("response-tests", "Tests", IconName::FlaskConical, Pane::Tests),
+                            ("response-console", "Console", IconName::Terminal, Pane::Console),
+                        ]
+                        .map(|(id, label, icon, pane)| {
+                            pane_icon_button(id, label, icon, self.response_pane == pane)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.select_response_pane(pane, window, cx);
+                                }))
+                        }),
+                    ),
+            )
     }
 }
 
@@ -2610,20 +2661,16 @@ fn pane_button(id: &'static str, label: &'static str, selected: bool) -> Button 
         .text_color(rgb(if selected { ACCENT } else { MUTED }))
 }
 
-fn shortcut_hint(key: &str) -> Div {
-    let modifier = if cfg!(target_os = "macos") {
-        "⌘"
-    } else {
-        "Ctrl+"
-    };
-    div()
+fn pane_icon_button(id: &'static str, label: &'static str, icon: IconName, selected: bool) -> Button {
+    Button::new(id)
+        .ghost()
+        .small()
+        .compact()
         .flex_shrink_0()
-        .px_1()
-        .rounded_sm()
-        .text_size(px(10.))
-        .bg(rgb(RAISED))
-        .text_color(rgb(MUTED))
-        .child(format!("{modifier}{key}"))
+        .icon(icon)
+        .accessibility_label(label)
+        .tooltip(label)
+        .selected(selected)
 }
 
 fn section_label(label: &'static str) -> Div {
@@ -2633,7 +2680,7 @@ fn section_label(label: &'static str) -> Div {
         .child(label)
 }
 
-fn method_color(method: &str) -> u32 {
+pub(super) fn method_color(method: &str) -> u32 {
     match method {
         "GET" => GREEN,
         "POST" => AMBER,
