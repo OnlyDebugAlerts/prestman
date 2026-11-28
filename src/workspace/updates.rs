@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use futures::{StreamExt as _, channel::mpsc};
 use gpui_kit::component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
@@ -14,6 +15,7 @@ enum Phase {
     #[default]
     Idle,
     Checking,
+    Preparing,
     Installing,
     Ready,
 }
@@ -73,7 +75,7 @@ impl Workspace {
         self.updates.message = manual.then(|| "Checking for updates…".to_owned());
         self.updates.task = Some(cx.spawn_in(window, async move |view, cx| {
             let result = cx.background_spawn(async { updater::check() }).await;
-            _ = view.update_in(cx, |view, _, cx| {
+            _ = view.update_in(cx, |view, window, cx| {
                 view.updates.phase = Phase::Idle;
                 view.updates.message = None;
                 match result {
@@ -83,6 +85,9 @@ impl Workspace {
                                 Some(format!("Prestman {} is up to date", updater::VERSION));
                         }
                         view.updates.available = available;
+                        if updater::AUTO_INSTALL && view.updates.available.is_some() {
+                            view.install_update(window, cx);
+                        }
                     }
                     Err(error) if manual => {
                         view.updates.error = Some(format!("Could not check for updates: {error:#}"))
@@ -96,22 +101,40 @@ impl Workspace {
     }
 
     fn install_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.updates.phase != Phase::Idle {
+        if !self.updates.can_check() || self.exit_saved {
             return;
         }
         let Some(update) = self.updates.available.clone() else {
             return;
         };
-        self.updates.phase = Phase::Installing;
+        self.updates.phase = Phase::Preparing;
         self.updates.error = None;
-        self.updates.message = Some(format!(
-            "Downloading and verifying Prestman {}…",
-            update.version
-        ));
+        self.updates.message = None;
         self.updates.task = Some(cx.spawn_in(window, async move |view, cx| {
-            let result = cx
-                .background_spawn(async move { updater::install(update) })
-                .await;
+            let (prepared_tx, mut prepared_rx) = mpsc::unbounded();
+            let install = cx.background_spawn(async move {
+                updater::install(update, move || {
+                    // Keep closing available during the download. Once the artifact is verified,
+                    // wait for the UI to enter Installing before changing the installed files.
+                    let (allow, wait) = std::sync::mpsc::channel();
+                    if prepared_tx.unbounded_send(allow).is_err() || wait.recv().is_err() {
+                        return Err(self_update::Error::verification_rejected(
+                            "Prestman is closing",
+                        ));
+                    }
+                    Ok(())
+                })
+            });
+            if let Some(allow) = prepared_rx.next().await {
+                _ = view.update_in(cx, |view, _, cx| {
+                    if !view.exit_saved {
+                        view.updates.phase = Phase::Installing;
+                        _ = allow.send(());
+                        cx.notify();
+                    }
+                });
+            }
+            let result = install.await;
             _ = view.update_in(cx, |view, _, cx| {
                 view.updates.message = None;
                 match result {
@@ -150,15 +173,30 @@ impl Workspace {
         let update = self.updates.available.as_ref()?;
         let (label, tooltip) = match self.updates.phase {
             Phase::Ready => (
-                "Restart",
+                if updater::AUTO_INSTALL {
+                    "Update"
+                } else {
+                    "Restart"
+                },
                 format!(
                     "Restart to use Prestman {}. Your drafts will be saved.",
                     update.version
                 ),
             ),
+            Phase::Preparing => (
+                "Downloading…",
+                format!("Downloading and verifying Prestman {}", update.version),
+            ),
             Phase::Installing => (
                 "Updating…",
                 format!("Installing Prestman {}", update.version),
+            ),
+            _ if updater::AUTO_INSTALL => (
+                "Retry update",
+                format!(
+                    "Try downloading and installing Prestman {} again",
+                    update.version
+                ),
             ),
             _ => (
                 "Update",
@@ -173,7 +211,7 @@ impl Workspace {
                 .tooltip(tooltip)
                 .disabled(matches!(
                     self.updates.phase,
-                    Phase::Checking | Phase::Installing
+                    Phase::Checking | Phase::Preparing | Phase::Installing
                 ))
                 .on_click(cx.listener(|this, _, window, cx| {
                     if this.updates.phase == Phase::Ready {

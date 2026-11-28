@@ -5,6 +5,7 @@ use self_update::{Release, ReleaseAsset, ReleaseSource, backends::custom};
 use semver::Version;
 
 pub const VERSION: &str = env!("PRESTMAN_VERSION");
+pub const AUTO_INSTALL: bool = option_env!("PRESTMAN_RELEASE_TAG").is_some();
 pub const RELEASES_URL: &str = "https://github.com/OnlyDebugAlerts/prestman/releases";
 const ASSETS_API: &str = "https://api.github.com/repos/OnlyDebugAlerts/prestman/releases/assets";
 
@@ -15,8 +16,7 @@ pub struct AvailableUpdate {
     asset: ReleaseAsset,
 }
 
-// Freeze the metadata the user accepted, including the asset URL and digest. A new
-// release published between checking and clicking Update must not change the payload.
+// Keep the same asset URL and digest from discovery through installation.
 impl ReleaseSource for AvailableUpdate {
     fn get_releases(&self) -> self_update::Result<Vec<Release>> {
         Ok(vec![self.release.clone()])
@@ -108,9 +108,12 @@ pub fn check() -> Result<Option<AvailableUpdate>> {
         .map_or(Ok(None), |release| select_release(release, VERSION, target))
 }
 
-pub fn install(update: AvailableUpdate) -> Result<()> {
+pub fn install(
+    update: AvailableUpdate,
+    before_replace: impl Fn() -> self_update::Result<()> + Send + Sync + 'static,
+) -> Result<()> {
     ensure!(
-        install_builder(update, VERSION)
+        install_builder(update, VERSION, before_replace)
             .build()?
             .update()?
             .is_updated(),
@@ -119,7 +122,11 @@ pub fn install(update: AvailableUpdate) -> Result<()> {
     Ok(())
 }
 
-fn install_builder(update: AvailableUpdate, current: &str) -> custom::UpdateBuilder {
+fn install_builder(
+    update: AvailableUpdate,
+    current: &str,
+    before_replace: impl Fn() -> self_update::Result<()> + Send + Sync + 'static,
+) -> custom::UpdateBuilder {
     let asset = update.asset.clone();
     let mut builder = custom::Update::configure();
     builder
@@ -131,30 +138,35 @@ fn install_builder(update: AvailableUpdate, current: &str) -> custom::UpdateBuil
         .timeout(Duration::from_secs(15 * 60))
         .no_confirm(true)
         .show_output(false)
-        .show_download_progress(false);
+        .show_download_progress(false)
+        .verify_binary(move |_staged| {
+            #[cfg(target_os = "macos")]
+            verify_bundle(_staged)?;
+            before_replace()
+        });
 
     #[cfg(target_os = "macos")]
-    builder
-        .bundle_path_in_archive("Prestman.app")
-        .verify_binary(|bundle| {
-            let status = std::process::Command::new("/usr/bin/codesign")
-                .args(["--verify", "--deep", "--strict"])
-                .arg(bundle)
-                .status()?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(self_update::Error::verification_rejected(
-                    "The application bundle signature is invalid",
-                ))
-            }
-        });
+    builder.bundle_path_in_archive("Prestman.app");
     #[cfg(target_os = "windows")]
     builder.bin_path_in_archive("prestman.exe");
     #[cfg(target_os = "linux")]
     builder.bin_path_in_archive("prestman");
 
     builder
+}
+
+#[cfg(target_os = "macos")]
+fn verify_bundle(bundle: &std::path::Path) -> self_update::Result<()> {
+    let status = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(bundle)
+        .status()?;
+    if !status.success() {
+        return Err(self_update::Error::verification_rejected(
+            "The application bundle signature is invalid",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

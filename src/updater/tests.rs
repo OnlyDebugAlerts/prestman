@@ -148,7 +148,7 @@ fn accepted_selection_keeps_its_version_url_and_digest() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_update_checks_digest_before_replacing_the_file() -> Result<()> {
+fn windows_update_requires_a_valid_digest_and_permission_to_replace() -> Result<()> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use self_update::{
         http::{HeaderMap, header::ACCEPT},
@@ -192,26 +192,38 @@ fn windows_update_checks_digest_before_replacing_the_file() -> Result<()> {
     fs::write(&installed, b"previous executable")?;
     let download = Arc::new(Download(zip));
 
-    let run_update = |digest: &str| -> Result<_> {
+    let run_update = |digest: &str, allow_replace: bool| -> Result<_> {
         let release = Release::builder()
             .version("0.2.0")
             .asset(ReleaseAsset::new(name, format!("{ASSETS_API}/123")).with_digest(digest))
             .build()?;
         let update = select_release(release, "0.1.0", target)?.context("No update selected")?;
-        Ok(install_builder(update, "0.1.0")
-            .bin_install_path(&installed)
-            .http_client(download.clone())
-            .build()?
-            .update())
+        Ok(install_builder(update, "0.1.0", move || {
+            if !allow_replace {
+                return Err(self_update::Error::verification_rejected(
+                    "Prestman is closing",
+                ));
+            }
+            Ok(())
+        })
+        .bin_install_path(&installed)
+        .http_client(download.clone())
+        .build()?
+        .update())
     };
     assert!(matches!(
-        run_update(&format!("sha256:{}", "00".repeat(32)))?,
+        run_update(&format!("sha256:{}", "00".repeat(32)), true)?,
         Err(self_update::Error::ChecksumMismatch { .. })
     ));
     assert_eq!(fs::read(&installed)?, b"previous executable");
 
     let digest = "sha256:f8916f3b4258c9593cdb1fa3b83bbd332627ec882d4155db3687a78599669a23";
-    assert!(run_update(digest)??.is_updated());
+    assert!(matches!(
+        run_update(digest, false)?,
+        Err(self_update::Error::VerificationRejected { .. })
+    ));
+    assert_eq!(fs::read(&installed)?, b"previous executable");
+    assert!(run_update(digest, true)??.is_updated());
     assert_eq!(fs::read(installed)?, b"upgraded executable");
     Ok(())
 }
