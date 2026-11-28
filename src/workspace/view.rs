@@ -659,7 +659,10 @@ impl Workspace {
     }
 
     fn sidebar_width(&self, window: &Window) -> Pixels {
-        Self::clamp_sidebar_width(self.sidebar_width, window.viewport_size().width - DIVIDER_WIDTH)
+        Self::clamp_sidebar_width(
+            self.sidebar_width,
+            window.viewport_size().width - DIVIDER_WIDTH,
+        )
     }
 
     fn clamp_sidebar_width(width: Pixels, available: Pixels) -> Pixels {
@@ -771,14 +774,20 @@ impl Workspace {
                     .flex_shrink_0()
                     .children(
                         [
-                            ("sidebar-collections", "Collections", IconName::Library, false),
+                            (
+                                "sidebar-collections",
+                                "Collections",
+                                IconName::Library,
+                                false,
+                            ),
                             ("sidebar-history", "History", IconName::Clock, true),
                         ]
                         .map(|(id, label, icon, show)| {
-                            pane_icon_button(id, label, icon, history == show)
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                            pane_icon_button(id, label, icon, history == show).on_click(
+                                cx.listener(move |this, _, window, cx| {
                                     this.show_history(show, window, cx);
-                                }))
+                                }),
+                            )
                         }),
                     )
                     .child(div().flex_1())
@@ -1295,162 +1304,146 @@ impl Workspace {
         }
         let sending = entry.response.is_sending();
         let graphql = entry.draft.graphql.is_some();
-        toolbar
-            .child(
-                row()
-                    .gap_1p5()
-                    .child(
-                        row()
-                            .id("request-address-bar")
-                            .flex_1()
-                            .min_w_0()
-                            .h(REQUEST_CONTROL_HEIGHT)
-                            .rounded_md()
-                            .bg(rgb(EDITOR))
-                            .border_1()
-                            .border_color(rgb(if self.url.focus_handle(cx).is_focused(window) {
-                                ACCENT
-                            } else {
-                                BORDER
-                            }))
-                            .when(graphql, |bar| {
-                                bar.child(
-                                    row()
-                                        .w(px(72.))
-                                        .h_full()
-                                        .flex_shrink_0()
-                                        .border_r_1()
-                                        .border_color(rgb(BORDER))
-                                        .bg(rgb(SURFACE))
-                                        .px_2()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(VIOLET))
-                                        .child("GraphQL"),
-                                )
-                            })
-                            .when(!graphql, |bar| {
-                                let method = entry.draft.method.as_str();
-                                let color = Hsla::from(rgb(method_color(method)));
-                                bar.child(
-                                    div()
-                                        .ml(px(3.))
-                                        .w(px(if method.len() > 4 { 86. } else { 64. }))
-                                        .h(px(22.))
-                                        .flex_shrink_0()
-                                        .child(
-                                            Select::new(&self.method)
-                                                .xsmall()
-                                                .w_full()
-                                                .h_full()
-                                                .px_1()
-                                                .py_0()
-                                                .rounded_sm()
-                                                .border_color(transparent_black())
-                                                .bg(color.opacity(0.12))
-                                                .text_size(px(11.))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(color)
-                                                .menu_width(px(108.))
-                                                .accessibility_label("HTTP method"),
-                                        ),
-                                )
-                            })
-                            .child(
+        toolbar.child(
+            row()
+                .gap_1p5()
+                .child(
+                    row()
+                        .id("request-address-bar")
+                        .flex_1()
+                        .min_w_0()
+                        .h(REQUEST_CONTROL_HEIGHT)
+                        .rounded_md()
+                        .bg(rgb(EDITOR))
+                        .border_1()
+                        .border_color(rgb(if self.url.focus_handle(cx).is_focused(window) {
+                            ACCENT
+                        } else {
+                            BORDER
+                        }))
+                        .when(graphql, |bar| {
+                            bar.child(
+                                row()
+                                    .w(px(72.))
+                                    .h_full()
+                                    .flex_shrink_0()
+                                    .border_r_1()
+                                    .border_color(rgb(BORDER))
+                                    .bg(rgb(SURFACE))
+                                    .px_2()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(VIOLET))
+                                    .child("GraphQL"),
+                            )
+                        })
+                        .when(!graphql, |bar| {
+                            let method = entry.draft.method.as_str();
+                            let color = Hsla::from(rgb(method_color(method)));
+                            bar.child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .capture_action(cx.listener(
-                                        |this, action: &Enter, window, cx| {
-                                            if action.secondary {
-                                                this.send_request(window, cx);
-                                            }
-                                            cx.stop_propagation();
-                                        },
-                                    ))
+                                    .ml(px(3.))
+                                    .w(px(if method.len() > 4 { 86. } else { 64. }))
+                                    .h(px(22.))
+                                    .flex_shrink_0()
                                     .child(
-                                        self.variable_field(
-                                            &self.url,
-                                            Textarea::new(&self.url)
-                                                .small()
-                                                .font_family(
-                                                    Theme::global(cx).mono_font_family.clone(),
-                                                )
-                                                .appearance(false)
-                                                .bordered(false)
-                                                .h(REQUEST_CONTROL_HEIGHT - px(2.))
-                                                .aria_label("Request URL")
-                                                .on_paste({
-                                                    let url = self.url.clone();
-                                                    let workspace = cx.entity().downgrade();
-                                                    move |item, window, cx| {
-                                                        if let Some(text) =
-                                                            item.text().filter(|text| {
-                                                                !graphql
-                                                                    && crate::curl_import::is_curl(
-                                                                        text,
-                                                                    )
-                                                            })
-                                                        {
-                                                            let Some(view) = workspace.upgrade()
-                                                            else {
-                                                                return true;
-                                                            };
-                                                            let id = view.read(cx).active().id;
-                                                            let workspace = workspace.clone();
-                                                            // The paste hook runs inside the URL state's update.
-                                                            // Reload its fields only after that update has finished.
-                                                            window.defer(cx, move |window, cx| {
-                                                                _ = workspace.update(
-                                                                    cx,
-                                                                    |view, cx| {
-                                                                        view.import_curl(
-                                                                            id, &text, window, cx,
-                                                                        )
-                                                                    },
-                                                                );
-                                                            });
+                                        Select::new(&self.method)
+                                            .xsmall()
+                                            .w_full()
+                                            .h_full()
+                                            .px_1()
+                                            .py_0()
+                                            .rounded_sm()
+                                            .border_color(transparent_black())
+                                            .bg(color.opacity(0.12))
+                                            .text_size(px(11.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(color)
+                                            .menu_width(px(108.))
+                                            .accessibility_label("HTTP method"),
+                                    ),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .capture_action(cx.listener(|this, action: &Enter, window, cx| {
+                                    if action.secondary {
+                                        this.send_request(window, cx);
+                                    }
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    self.variable_field(
+                                        &self.url,
+                                        Textarea::new(&self.url)
+                                            .small()
+                                            .font_family(Theme::global(cx).mono_font_family.clone())
+                                            .appearance(false)
+                                            .bordered(false)
+                                            .h(REQUEST_CONTROL_HEIGHT - px(2.))
+                                            .aria_label("Request URL")
+                                            .on_paste({
+                                                let url = self.url.clone();
+                                                let workspace = cx.entity().downgrade();
+                                                move |item, window, cx| {
+                                                    if let Some(text) = item.text().filter(|text| {
+                                                        !graphql
+                                                            && crate::curl_import::is_curl(text)
+                                                    }) {
+                                                        let Some(view) = workspace.upgrade() else {
                                                             return true;
-                                                        }
-                                                        if let Some(text) =
-                                                            item.text().filter(|text| {
-                                                                text.contains(['\r', '\n'])
-                                                            })
-                                                        {
-                                                            url.update(cx, |state, cx| {
-                                                                state.replace(
-                                                                    text.replace(['\r', '\n'], ""),
-                                                                    window,
-                                                                    cx,
+                                                        };
+                                                        let id = view.read(cx).active().id;
+                                                        let workspace = workspace.clone();
+                                                        // The paste hook runs inside the URL state's update.
+                                                        // Reload its fields only after that update has finished.
+                                                        window.defer(cx, move |window, cx| {
+                                                            _ = workspace.update(cx, |view, cx| {
+                                                                view.import_curl(
+                                                                    id, &text, window, cx,
                                                                 )
                                                             });
-                                                            true
-                                                        } else {
-                                                            false
-                                                        }
+                                                        });
+                                                        return true;
                                                     }
-                                                }),
-                                            cx,
-                                        ),
+                                                    if let Some(text) = item
+                                                        .text()
+                                                        .filter(|text| text.contains(['\r', '\n']))
+                                                    {
+                                                        url.update(cx, |state, cx| {
+                                                            state.replace(
+                                                                text.replace(['\r', '\n'], ""),
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        });
+                                                        true
+                                                    } else {
+                                                        false
+                                                    }
+                                                }
+                                            }),
+                                        cx,
                                     ),
-                            ),
-                    )
-                    .child(self.inspect_url_variables_button(compact, cx))
-                    .child(
-                        Button::new("send-request")
-                            .primary()
-                            .small()
-                            .flex_shrink_0()
-                            .h(REQUEST_CONTROL_HEIGHT)
-                            .label(if sending { "Sending…" } else { "Send" })
-                            .disabled(sending || self.variable_editor.is_some())
-                            .tooltip("Send request")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.send_request(window, cx)),
-                            ),
-                    ),
-            )
+                                ),
+                        ),
+                )
+                .child(self.inspect_url_variables_button(compact, cx))
+                .child(
+                    Button::new("send-request")
+                        .primary()
+                        .small()
+                        .flex_shrink_0()
+                        .h(REQUEST_CONTROL_HEIGHT)
+                        .label(if sending { "Sending…" } else { "Send" })
+                        .disabled(sending || self.variable_editor.is_some())
+                        .tooltip("Send request")
+                        .on_click(cx.listener(|this, _, window, cx| this.send_request(window, cx))),
+                ),
+        )
     }
 
     fn grpc_toolbar(&self, cx: &Context<Self>) -> Div {
@@ -2661,7 +2654,12 @@ fn pane_button(id: &'static str, label: &'static str, selected: bool) -> Button 
         .text_color(rgb(if selected { ACCENT } else { MUTED }))
 }
 
-fn pane_icon_button(id: &'static str, label: &'static str, icon: IconName, selected: bool) -> Button {
+fn pane_icon_button(
+    id: &'static str,
+    label: &'static str,
+    icon: IconName,
+    selected: bool,
+) -> Button {
     Button::new(id)
         .ghost()
         .small()
