@@ -14,6 +14,96 @@ fn variable(name: &str, value: &str) -> Variable {
 }
 
 #[test]
+fn cloud_request_resolves_and_updates_linked_local_workspace_variables() -> Result<()> {
+    use crate::request::Authorization;
+
+    let request = Request {
+        url: "{{base_url}}/users".into(),
+        authorization: Authorization::Bearer {
+            token: "{{auth_token}}".into(),
+        },
+        pre_request_script: r#"
+            pm.expect(pm.globals.get('base_url')).to.equal('https://example.test');
+            pm.expect(pm.variables.get('auth_token')).to.equal('local-token');
+            pm.environment.set('auth_token', 'refreshed-token');
+            pm.expect(pm.variables.replaceIn('{{auth_token}}')).to.equal('refreshed-token');
+        "#
+        .into(),
+        ..Request::default()
+    };
+    let globals = [variable("base_url", "https://example.test")];
+    let mut environment = vec![variable("auth_token", "local-token")];
+    let scopes = Scopes::for_cloud(true, &globals, &environment);
+    let client = Client::new();
+    let execution = execute_with(&client, request.clone(), scopes, |outgoing, _, _, _| {
+        assert_eq!(outgoing.url, "https://example.test/users");
+        assert_eq!(
+            outgoing.authorization,
+            Authorization::Bearer {
+                token: "refreshed-token".into()
+            },
+        );
+        Ok(Response {
+            status: 200,
+            reason: "OK",
+            elapsed: Duration::ZERO,
+            body_bytes: 0,
+            is_json: false,
+            body: "".into(),
+            raw_body: "".into(),
+            headers: String::new(),
+            trailers: String::new(),
+            grpc_server_streaming: None,
+        })
+    });
+    assert!(execution.response.is_ok(), "{:?}", execution.response.err());
+    let [mutation] = execution.mutations.as_slice() else {
+        anyhow::bail!("Expected exactly one variable write");
+    };
+    assert_eq!(mutation.scope, "environment");
+    mutation.apply(&mut environment);
+    let scopes = Scopes::for_cloud(true, &globals, &environment);
+    assert_eq!(
+        scopes.resolve_request(&request)?.authorization,
+        Authorization::Bearer {
+            token: "refreshed-token".into()
+        },
+    );
+    assert_eq!(crate::cloud::share_request(request.clone()), request);
+    Ok(())
+}
+
+#[test]
+fn cloud_disallows_persistent_variables_without_a_local_workspace_link() -> Result<()> {
+    let environment = [variable("auth_token", "local-token")];
+    let (output, error) = evaluate(
+        r#"
+        pm.expect(pm.variables.get('auth_token')).to.be.undefined;
+        pm.expect(() => pm.environment.set('auth_token', 'token')).to.throw('Use Local workspace variables');
+        pm.expect(() => pm.globals.clear()).to.throw('Use Local workspace variables');
+        pm.variables.set('temporary', 'value');
+        "#,
+        None,
+        &Scopes::for_cloud(false, &[], &environment),
+    )?;
+    assert!(error.is_none(), "{error:?}");
+    assert!(output.mutations.is_empty());
+    assert_eq!(output.locals["temporary"], "value");
+
+    let (_, error) = evaluate(
+        "pm.collectionVariables.set('auth_token', 'token');",
+        None,
+        &Scopes::for_cloud(true, &[], &environment),
+    )?;
+    assert!(
+        error
+            .unwrap_or_default()
+            .contains("through pm.environment or pm.globals")
+    );
+    Ok(())
+}
+
+#[test]
 fn nested_folder_scopes_match_script_lookup_and_keep_collection_mutations_at_the_root() -> Result<()>
 {
     let groups = vec![

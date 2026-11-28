@@ -12,7 +12,6 @@ pub(super) struct VariableEditor {
     pub(super) fields: Vec<VariableFields>,
     pub(super) error: Option<String>,
     pub(super) original: Vec<Variable>,
-    team_version: Option<crate::cloud::ItemRevision>,
 }
 
 pub(super) struct VariableFields {
@@ -101,6 +100,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.in_team() {
+            return;
+        }
         self.variable_hover = None;
         self.openapi_import = None;
         let variables = match scope {
@@ -131,10 +133,6 @@ impl Workspace {
             fields,
             error: None,
             original,
-            team_version: match scope {
-                VariableScope::Collection(id) => self.team_group_version(id),
-                _ => None,
-            },
         });
         self.sync_visualizer(window, cx);
         self.save_error = None;
@@ -211,11 +209,13 @@ impl Workspace {
     }
 
     pub(super) fn save_variables(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.in_team() {
+            return;
+        }
         let Some(editor) = &mut self.variable_editor else {
             return;
         };
         let scope = editor.scope;
-        let team_version = editor.team_version;
         let variables = match editor.variables(cx) {
             Ok(variables) => variables,
             Err(error) => {
@@ -240,18 +240,7 @@ impl Workspace {
         };
         let variables = crate::variables::merge_edits(&editor.original, &variables, destination);
         let previous = std::mem::replace(destination, variables);
-        let saved = if self.in_team()
-            && matches!(scope, VariableScope::Global | VariableScope::Environment)
-        {
-            self.save_error = self
-                .save_team_cache(false, None)
-                .err()
-                .map(|error| format!("Could not save variables. {error:#}"));
-            self.save_error.is_none()
-        } else {
-            self.persist_at_revision("Could not save variables", team_version, cx)
-        };
-        if !saved {
+        if !self.persist("Could not save variables", cx) {
             match scope {
                 VariableScope::Global => self.global_variables = previous,
                 VariableScope::Environment => self.environment_variables = previous,

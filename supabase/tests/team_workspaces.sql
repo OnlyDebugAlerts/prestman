@@ -18,11 +18,14 @@ declare
     collection_id constant text := '22000000-0000-4000-8000-000000000001';
     first_id constant text := '22000000-0000-4000-8000-000000000002';
     second_id constant text := '22000000-0000-4000-8000-000000000003';
+    new_group_id constant text := '22000000-0000-4000-8000-000000000004';
     team uuid;
     editor_invite uuid;
     viewer_invite uuid;
     result jsonb;
     collection constant jsonb := '{"kind":"group","parent":null,"name":"Shared API","variables":[]}';
+    collection_with_variables constant jsonb := jsonb_set(collection, '{variables}',
+        '[{"name":"auth_token","value":"test-token","enabled":true}]');
     request_template constant jsonb := jsonb_build_object('kind', 'request', 'parent', collection_id, 'request',
         '{"name":"Health check","method":"GET","url":"https://example.test/health","body":""}'::jsonb);
     editor_request constant jsonb := jsonb_set(request_template, '{request,url}', '"https://example.test/ready"');
@@ -39,6 +42,22 @@ begin
         second_id, jsonb_build_object('expected', null, 'content', request_template)
     ));
     assert result->>'revision' = '1';
+
+    begin
+        perform public.prestman_sync(team, jsonb_build_object(
+            new_group_id, jsonb_build_object('expected', null, 'content', collection_with_variables)
+        ));
+        raise exception 'Cloud accepted a new collection containing variables.';
+    exception when invalid_parameter_value then null;
+    end;
+    begin
+        perform public.prestman_sync(team, jsonb_build_object(
+            collection_id, jsonb_build_object('expected', 1, 'content', collection_with_variables)
+        ));
+        raise exception 'Cloud accepted variables added to an existing collection.';
+    exception when invalid_parameter_value then null;
+    end;
+    assert public.prestman_sync(team, '{}')->>'revision' = '1';
 
     perform set_config('request.jwt.claim.sub', outsider_id::text, true);
     assert public.prestman_workspaces() = '[]'::jsonb;

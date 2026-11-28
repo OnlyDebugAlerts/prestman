@@ -123,8 +123,7 @@ struct LocalView {
     requests: Vec<Entry>,
     request_tabs: Vec<usize>,
     collections: Vec<Collection>,
-    globals: Vec<Variable>,
-    environment: Vec<Variable>,
+    sidebar: SidebarState<usize>,
     collapsed: HashSet<usize>,
     selected: usize,
 }
@@ -168,6 +167,27 @@ impl Workspace {
             .mounted
             .as_ref()
             .is_none_or(|mounted| mounted.team.role.can_edit())
+    }
+
+    pub(super) fn team_uses_local_workspace_variables(&self) -> Option<bool> {
+        self.cloud
+            .mounted
+            .as_ref()
+            .map(|mounted| mounted.cache.use_local_workspace_variables)
+    }
+
+    pub(super) fn toggle_team_local_workspace_variables(&mut self, cx: &mut Context<Self>) {
+        let Some(mounted) = &mut self.cloud.mounted else {
+            return;
+        };
+        let previous = mounted.cache.use_local_workspace_variables;
+        mounted.cache.use_local_workspace_variables = !previous;
+        self.save_error = mounted.cache.save(&mounted.path).err().map(|error| {
+            mounted.cache.use_local_workspace_variables = previous;
+            format!("Could not update the local workspace variable setting. {error:#}")
+        });
+        self.variable_hover = None;
+        cx.notify();
     }
 
     pub(super) fn open_cloud(
@@ -715,15 +735,7 @@ impl Workspace {
                 .parent_id
                 .and_then(|parent| ids.get(&parent).copied()),
             name: collection.name.clone(),
-            variables: collection
-                .variables
-                .iter()
-                .cloned()
-                .map(|mut row| {
-                    row.value.clear();
-                    row
-                })
-                .collect(),
+            variables: [],
         };
         let groups = self
             .collections
@@ -808,16 +820,13 @@ impl Workspace {
         })?;
         self.remember_request_view();
         self.cloud.local = Some(LocalView {
+            sidebar: self.local_sidebar(false),
             requests: std::mem::take(&mut self.requests),
             request_tabs: std::mem::take(&mut self.request_tabs),
             collections: std::mem::take(&mut self.collections),
-            globals: std::mem::take(&mut self.global_variables),
-            environment: std::mem::take(&mut self.environment_variables),
             collapsed: std::mem::take(&mut self.collapsed_collections),
             selected: self.selected,
         });
-        self.global_variables = cache.globals.clone();
-        self.environment_variables = cache.environment.clone();
         let generation = Uuid::new_v4();
         self.cloud.mounted = Some(Mounted {
             team,
@@ -872,8 +881,6 @@ impl Workspace {
         self.requests = local.requests;
         self.request_tabs = local.request_tabs;
         self.collections = local.collections;
-        self.global_variables = local.globals;
-        self.environment_variables = local.environment;
         self.collapsed_collections = local.collapsed;
         self.selected = local.selected;
         self.reset_team_view();
@@ -942,7 +949,7 @@ impl Workspace {
                             .parent_id
                             .and_then(|id| mounted.group_ids.get(&id).copied()),
                         name: group.name.clone(),
-                        variables: group.variables.clone(),
+                        variables: [],
                     },
                 )
             });
@@ -965,8 +972,6 @@ impl Workspace {
             );
             next.stage(desired, base);
         }
-        next.globals = self.global_variables.clone();
-        next.environment = self.environment_variables.clone();
         next.sidebar = SidebarState {
             collapsed_collections: self
                 .collections
@@ -1046,28 +1051,23 @@ impl Workspace {
             group_ids.iter().map(|(&id, &key)| (key, id)).collect();
         let mut groups = Vec::new();
         for (&key, content) in &working {
-            if let Content::Group {
-                parent,
-                name,
-                variables,
-            } = content
-            {
+            if let Content::Group { parent, name, .. } = content {
                 let id = *group_by_key.entry(key).or_insert_with(|| {
                     let id = self.next_collection_id;
                     self.next_collection_id += 1;
                     group_ids.insert(id, key);
                     id
                 });
-                groups.push((id, *parent, name.clone(), variables.clone()));
+                groups.push((id, *parent, name.clone()));
             }
         }
         self.collections = groups
             .into_iter()
-            .map(|(id, parent, name, variables)| Collection {
+            .map(|(id, parent, name)| Collection {
                 id,
                 parent_id: parent.and_then(|parent| group_by_key.get(&parent).copied()),
                 name,
-                variables,
+                variables: Vec::new(),
             })
             .collect();
         self.collections
@@ -1336,40 +1336,44 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn team_collection_values(&self, id: Option<usize>, values: &mut Vec<Variable>) {
-        let Some(overrides) = self.cloud.mounted.as_ref().and_then(|mounted| {
-            mounted
-                .cache
-                .collection_values
-                .get(mounted.group_ids.get(&id?)?)
-        }) else {
-            return;
-        };
-        for (name, value) in overrides {
-            scripting::Mutation {
-                scope: String::new(),
-                name: name.clone(),
-                value: value.clone(),
-            }
-            .apply(values);
-        }
-    }
-
-    pub(super) fn set_team_collection_value(
+    pub(super) fn save_linked_script_variables(
         &mut self,
-        id: Option<usize>,
-        mutation: &scripting::Mutation,
-    ) {
-        if let Some(mounted) = &mut self.cloud.mounted
-            && let Some(&group) = id.and_then(|id| mounted.group_ids.get(&id))
-        {
-            mounted
-                .cache
-                .collection_values
-                .entry(group)
-                .or_default()
-                .insert(mutation.name.clone(), mutation.value.clone());
+        mutations: &[scripting::Mutation],
+    ) -> Result<()> {
+        ensure!(
+            self.team_uses_local_workspace_variables() == Some(true),
+            "Enable Settings → Use Local workspace variables first."
+        );
+        let local = self
+            .cloud
+            .local
+            .as_ref()
+            .context("Local workspace is unavailable.")?;
+        let storage = self
+            .storage
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let mut globals = self.global_variables.clone();
+        let mut environment = self.environment_variables.clone();
+        for mutation in mutations {
+            match mutation.scope.as_str() {
+                "globals" => mutation.apply(&mut globals),
+                "environment" => mutation.apply(&mut environment),
+                _ => anyhow::bail!(
+                    "Cloud scripts can save only linked Globals and Environment variables."
+                ),
+            }
         }
+        storage.save(
+            &local.collections,
+            &globals,
+            &environment,
+            local.requests.iter().filter_map(Entry::stored),
+            local.sidebar.clone(),
+        )?;
+        self.global_variables = globals;
+        self.environment_variables = environment;
+        Ok(())
     }
 }
 

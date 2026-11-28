@@ -31,11 +31,26 @@ pub struct Scopes {
     pub collection: Vec<Variable>,
     pub folder: Vec<Variable>,
     pub environment: Vec<Variable>,
+    // None is Local workspace. A team workspace opts in to access both scopes.
+    pub cloud_linked: Option<bool>,
     pub locals: BTreeMap<String, String>,
     pub collection_id: Option<usize>,
 }
 
 impl Scopes {
+    pub fn for_cloud(linked: bool, globals: &[Variable], environment: &[Variable]) -> Self {
+        Self {
+            cloud_linked: Some(linked),
+            globals: if linked { globals.to_vec() } else { Vec::new() },
+            environment: if linked {
+                environment.to_vec()
+            } else {
+                Vec::new()
+            },
+            ..Self::default()
+        }
+    }
+
     pub fn for_request(
         globals: &[Variable],
         environment: &[Variable],
@@ -60,6 +75,32 @@ impl Scopes {
                 .collect(),
             ..Self::default()
         }
+    }
+
+    pub fn scoped_variables(&self) -> impl Iterator<Item = &Variable> {
+        self.collection
+            .iter()
+            .chain(&self.folder)
+            .chain(&self.environment)
+    }
+
+    pub fn resolve_request(&self, request: &Request) -> Result<Request> {
+        let (globals, scoped) = self.request_variables();
+        resolve_request(request, &globals, &scoped)
+    }
+
+    fn request_variables(&self) -> (Vec<Variable>, Vec<Variable>) {
+        let globals = self.globals.clone();
+        let scoped = self
+            .scoped_variables()
+            .cloned()
+            .chain(self.locals.iter().map(|(name, value)| Variable {
+                name: name.clone(),
+                value: value.clone(),
+                enabled: true,
+            }))
+            .collect();
+        (globals, scoped)
     }
 }
 
@@ -171,20 +212,8 @@ pub fn execute_with(
                 bail!("Pre-request: {error}");
             }
         }
-        let collection: Vec<_> = scopes
-            .collection
-            .iter()
-            .chain(&scopes.folder)
-            .chain(&scopes.environment)
-            .cloned()
-            .chain(scopes.locals.iter().map(|(name, value)| Variable {
-                name: name.clone(),
-                value: value.clone(),
-                enabled: true,
-            }))
-            .collect();
-        let outgoing = resolve_request(&outgoing, &scopes.globals, &collection)?;
-        let globals = scopes.globals.clone();
+        let (globals, scoped) = scopes.request_variables();
+        let outgoing = resolve_request(&outgoing, &globals, &scoped)?;
         let on_message_source = outgoing
             .grpc
             .as_ref()
@@ -227,7 +256,7 @@ pub fn execute_with(
         } else {
             None
         };
-        let response = send(outgoing.clone(), &globals, &collection, observer)?;
+        let response = send(outgoing.clone(), &globals, &scoped, observer)?;
         if !post.trim().is_empty() {
             match run(
                 client,

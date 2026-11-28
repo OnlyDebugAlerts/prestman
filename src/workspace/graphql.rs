@@ -2,7 +2,6 @@ use super::*;
 use crate::{
     graphql,
     request::{GraphqlOptions, Request},
-    variables::resolve_request,
 };
 
 pub(super) struct GraphqlFields {
@@ -118,13 +117,7 @@ impl Workspace {
             let request = target.clone();
             let result = cx
                 .background_spawn(async move {
-                    let scoped = scopes
-                        .collection
-                        .into_iter()
-                        .chain(scopes.folder)
-                        .chain(scopes.environment)
-                        .collect::<Vec<_>>();
-                    let request = resolve_request(&request, &scopes.globals, &scoped)?;
+                    let request = scopes.resolve_request(&request)?;
                     graphql::load_schema(&client, request)
                 })
                 .await

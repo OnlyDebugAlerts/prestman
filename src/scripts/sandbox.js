@@ -10,30 +10,38 @@
         catch (_) { return String(value); }
     };
     const errorText = error => error && error.message ? error.message : String(error);
-    const stores = {};
-    function scope(name, rows) {
+    function scope(scopeName, rows) {
         const values = new Map(rows.filter(row => row.enabled).map(row => [row.name, row.value]));
+        const checkCloudWrite = () => {
+            if (input.scopes.cloud_linked === null || scopeName === "locals") return;
+            if (scopeName === "collection") throw new Error("Cloud scripts can save variables through pm.environment or pm.globals linked to Local workspace");
+            if (!input.scopes.cloud_linked) throw new Error("Enable Settings → Use Local workspace variables first");
+        };
         const api = {
             get: name => values.get(String(name)),
             has: name => values.has(String(name)),
             set(name, value) {
+                checkCloudWrite();
                 name = String(name); value = text(value);
                 if (!name.trim() || /[{}]/.test(name)) throw new Error("Enter a non-empty variable name without braces");
-                if (api.scope === "collection" && input.scopes.collection_id === null) throw new Error("Move this request to a collection to save collection variables");
+                if (scopeName === "collection" && input.scopes.collection_id === null) throw new Error("Move this request to a collection to save collection variables");
                 values.set(name, value);
-                if (api.scope !== "locals") mutations.push({scope: api.scope, name, value});
+                if (scopeName !== "locals") mutations.push({scope: scopeName, name, value});
             },
             unset(name) {
-                if (api.scope === "collection" && input.scopes.collection_id === null) throw new Error("This request does not belong to a collection");
+                checkCloudWrite();
+                if (scopeName === "collection" && input.scopes.collection_id === null) throw new Error("This request does not belong to a collection");
                 name = String(name); values.delete(name);
-                if (api.scope !== "locals") mutations.push({scope: api.scope, name, value: null});
+                if (scopeName !== "locals") mutations.push({scope: scopeName, name, value: null});
             },
-            clear() { for (const name of [...values.keys()]) api.unset(name); },
+            clear() {
+                checkCloudWrite();
+                for (const name of [...values.keys()]) api.unset(name);
+            },
             toObject: () => Object.fromEntries(values),
             replaceIn: value => replace(value, name => api.get(name)),
-            scope: name,
+            scope: scopeName,
         };
-        stores[name] = api;
         return api;
     }
     const globals = scope("globals", input.scopes.globals);

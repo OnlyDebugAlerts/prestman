@@ -127,7 +127,8 @@ pub(super) fn build_collection(
     };
     let view = view.read(cx);
     let locked = view.storage.is_err() || !view.team_can_edit();
-    let can_publish = !view.in_team() && !locked;
+    let local = !view.in_team();
+    let can_publish = local && !locked;
     let is_root = view
         .collections
         .iter()
@@ -147,14 +148,16 @@ pub(super) fn build_collection(
                 view.edit_collection(CollectionEdit::Rename(id), window, cx);
             },
         ))
-        .item(item(
-            "Variables",
-            &workspace,
-            false,
-            move |view, window, cx| {
-                view.edit_variables(VariableScope::Collection(id), window, cx);
-            },
-        ))
+        .when(local, |menu| {
+            menu.item(item(
+                "Variables",
+                &workspace,
+                false,
+                move |view, window, cx| {
+                    view.edit_variables(VariableScope::Collection(id), window, cx)
+                },
+            ))
+        })
         .when(is_root && can_publish, |menu| {
             menu.item(item(
                 "Publish to cloud…",
@@ -244,26 +247,43 @@ pub(super) fn build_settings(
     workspace: WeakEntity<Workspace>,
     cx: &App,
 ) -> PopupMenu {
-    menu.item(item("Globals", &workspace, false, |view, window, cx| {
-        view.edit_variables(VariableScope::Global, window, cx);
-    }))
-    .item(item(
-        "Environment",
-        &workspace,
-        false,
-        |view, window, cx| view.edit_variables(VariableScope::Environment, window, cx),
-    ))
-    .separator()
-    .item(openapi_item(&workspace, cx))
-    .separator()
-    .item(item(
-        format!("Check for updates… (v{})", crate::updater::VERSION),
-        &workspace,
-        workspace
-            .upgrade()
-            .is_none_or(|view| !view.read(cx).updates.can_check()),
-        |view, window, cx| view.check_for_updates(true, window, cx),
-    ))
+    let use_local_variables = workspace
+        .upgrade()
+        .and_then(|view| view.read(cx).team_uses_local_workspace_variables());
+    let menu = match use_local_variables {
+        Some(enabled) => menu.item(
+            item(
+                "Use Local workspace variables",
+                &workspace,
+                false,
+                |view, _, cx| view.toggle_team_local_workspace_variables(cx),
+            )
+            .checked(enabled),
+        ),
+        None => menu
+            .item(item("Globals", &workspace, false, |view, window, cx| {
+                view.edit_variables(VariableScope::Global, window, cx);
+            }))
+            .item(item(
+                "Environment",
+                &workspace,
+                false,
+                |view, window, cx| {
+                    view.edit_variables(VariableScope::Environment, window, cx);
+                },
+            )),
+    };
+    menu.separator()
+        .item(openapi_item(&workspace, cx))
+        .separator()
+        .item(item(
+            format!("Check for updates… (v{})", crate::updater::VERSION),
+            &workspace,
+            workspace
+                .upgrade()
+                .is_none_or(|view| !view.read(cx).updates.can_check()),
+            |view, window, cx| view.check_for_updates(true, window, cx),
+        ))
 }
 
 pub(super) fn build_sidebar(

@@ -143,10 +143,16 @@ impl Workspace {
 
     fn insert_import(
         &mut self,
-        imported: ImportedCollection,
+        mut imported: ImportedCollection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        if self.in_team() {
+            imported.variables.clear();
+            for folder in &mut imported.folders {
+                folder.variables.clear();
+            }
+        }
         let collection_id = self.next_collection_id;
         let next_collection_id = collection_id
             .checked_add(1 + imported.folders.len())

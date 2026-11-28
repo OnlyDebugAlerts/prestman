@@ -873,6 +873,11 @@ impl Workspace {
                         )
                         .child(div().text_xs().text_color(rgb(MUTED)).child("JSON or YAML")),
                 )
+                .when(self.in_team(), |panel| {
+                    panel.child(div().text_color(rgb(MUTED)).child(
+                        "Set baseUrl and other request variables in Local workspace, then link them in Settings.",
+                    ))
+                })
                 .when(import.busy, |panel| {
                     panel.child(row().gap_2().child(Spinner::new()).child("Importing…"))
                 })
@@ -1801,30 +1806,12 @@ impl Workspace {
             .expect("variable editor is open");
         let (title, description) = match editor.scope {
             VariableScope::Global => (
-                if self.in_team() {
-                    "Local global variables"
-                } else {
-                    "Global variables"
-                }
-                .to_owned(),
-                if self.in_team() {
-                    "Stored on this device for requests in this workspace. Shared defaults take precedence."
-                } else {
-                    "Available in every request. Collection variables override globals with the same name."
-                },
+                "Global variables".to_owned(),
+                "Available in every request. Collection variables override globals with the same name.",
             ),
             VariableScope::Environment => (
-                if self.in_team() {
-                    "Local environment variables"
-                } else {
-                    "Environment variables"
-                }
-                .to_owned(),
-                if self.in_team() {
-                    "Store your credentials and other private values here. These values override shared defaults."
-                } else {
-                    "Available in every request and in pm.environment. These values override collection and global variables."
-                },
+                "Environment variables".to_owned(),
+                "Available in every request and in pm.environment. These values override collection and global variables.",
             ),
             VariableScope::Collection(id) => (
                 self.collections
@@ -1832,25 +1819,16 @@ impl Workspace {
                     .find(|collection| collection.id == id)
                     .map(|collection| {
                         format!(
-                            "{} / {}",
+                            "{} / Variables",
                             crate::storage::lineage(&self.collections, collection.id)
                                 .iter()
                                 .map(|group| group.name.as_str())
                                 .collect::<Vec<_>>()
                                 .join(" / "),
-                            if self.in_team() {
-                                "Shared variables"
-                            } else {
-                                "Variables"
-                            },
                         )
                     })
                     .unwrap_or_default(),
-                if self.in_team() {
-                    "Values saved here are shared with everyone in the workspace. Store credentials in Settings → Environment."
-                } else {
-                    "Available to requests in this collection or folder and its subfolders. Values override the parent scope; Environment has higher priority."
-                },
+                "Available to requests in this collection or folder and its subfolders. Values override the parent scope; Environment has higher priority.",
             ),
         };
         column()
@@ -1882,10 +1860,7 @@ impl Workspace {
                         Button::new("save-variables")
                             .primary()
                             .label("Save")
-                            .disabled(
-                                self.storage.is_err()
-                                    || (matches!(editor.scope, VariableScope::Collection(_)) && !self.team_can_edit()),
-                            )
+                            .disabled(self.storage.is_err())
                             .on_click(cx.listener(|this, _, window, cx| this.save_variables(window, cx))),
                     ),
             )

@@ -126,7 +126,7 @@ Chai 4.5.0 включён в `assets/vendor/chai.js` из npm-пакета `chai
 
 Для проверки без внешнего API используйте [готовые pre/post scripts и локальный сервер](../examples/scripts/README.md): ожидается **7/7 tests passed**.
 
-`pm.environment.set(name, value)` создаёт или обновляет переменную общего окружения Prestman. После завершения скриптов изменения автоматически записываются в `environment_variables` локального файла `requests.json`. Открыть значения: **Settings → Environment**. `console.log()` отображается отдельно через иконку **Console** внизу справа в панели ответа.
+`pm.environment.set(name, value)` сохраняет переменную в **Local workspace → Settings → Environment**. Командному скрипту для чтения и записи `pm.environment` и `pm.globals` нужно включить **Settings → Use Local workspace variables** в Cloud. Эти изменения доступны и другим запросам, использующим те же локальные переменные. Запись в `pm.collectionVariables` доступна для локальных коллекций. `pm.variables.set` задаёт значение на время текущего запроса. `console.log()` отображается отдельно через иконку **Console** внизу справа в панели ответа.
 
 ## CryptoJS
 

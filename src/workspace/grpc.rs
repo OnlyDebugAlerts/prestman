@@ -11,7 +11,6 @@ use super::*;
 use crate::{
     grpc,
     request::{GrpcOptions, GrpcProto},
-    variables::resolve_request,
 };
 
 #[derive(Default)]
@@ -226,14 +225,7 @@ impl Workspace {
         {
             return Ok(target);
         }
-        let scopes = self.variable_scopes();
-        let scoped = scopes
-            .collection
-            .into_iter()
-            .chain(scopes.folder)
-            .chain(scopes.environment)
-            .collect::<Vec<_>>();
-        resolve_request(&target, &scopes.globals, &scoped)
+        self.variable_scopes().resolve_request(&target)
     }
 
     pub(super) fn discover_grpc_methods_if_needed(

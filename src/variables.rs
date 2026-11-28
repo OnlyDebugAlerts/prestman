@@ -250,7 +250,9 @@ impl Resolver<'_> {
             return Ok(value.clone());
         }
         let Some(&value) = self.values.get(name) else {
-            bail!("Undefined variable: {{{{{name}}}}}. Add it to Globals or this collection.");
+            bail!(
+                "Undefined variable: {{{{{name}}}}}. Check the variable settings. For Cloud requests, enable Settings → Use Local workspace variables."
+            );
         };
         ensure!(
             !self.stack.iter().any(|item| item == name),

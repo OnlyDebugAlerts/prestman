@@ -21,4 +21,12 @@ select not exists (
 insert into prestman_install.migrations values ('202611200001');
 \endif
 
+select not exists (
+    select from prestman_install.migrations where version = '202611270001'
+) as apply_local_workspace_variables \gset
+\if :apply_local_workspace_variables
+\ir /migrations/202611270001_local_workspace_variables.sql
+insert into prestman_install.migrations values ('202611270001');
+\endif
+
 commit;

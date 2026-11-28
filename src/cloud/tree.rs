@@ -23,7 +23,9 @@ pub enum Content {
     Group {
         parent: Option<Uuid>,
         name: String,
-        variables: Vec<Variable>,
+        // Older servers require this field. Ignore values from older clients.
+        #[serde(default, skip_deserializing)]
+        variables: [(); 0],
     },
     Request {
         parent: Option<Uuid>,
@@ -83,9 +85,15 @@ pub struct Cache {
     pub remote_revision: Option<u64>,
     pub pending: Changes,
     pub drafts: BTreeMap<Uuid, Draft>,
-    pub globals: Vec<Variable>,
-    pub environment: Vec<Variable>,
-    pub collection_values: BTreeMap<Uuid, BTreeMap<String, Option<String>>>,
+    // Preserve existing on-device values for recovery from older caches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    globals: Vec<Variable>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    environment: Vec<Variable>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    collection_values: BTreeMap<Uuid, BTreeMap<String, Option<String>>>,
+    #[serde(default)]
+    pub use_local_workspace_variables: bool,
     #[serde(default)]
     pub sidebar: SidebarState<Uuid>,
 }
@@ -93,8 +101,15 @@ pub struct Cache {
 impl Cache {
     pub fn open(path: &Path) -> Result<Self> {
         match File::open(path) {
-            Ok(file) => serde_json::from_reader(BufReader::new(file))
-                .context("Could not read the local cloud workspace cache."),
+            Ok(file) => {
+                let mut cache: Self = serde_json::from_reader(BufReader::new(file))
+                    .context("Could not read the local cloud workspace cache.")?;
+                cache.pending.retain(|id, change| {
+                    !matches!(change.content, Some(Content::Group { .. }))
+                        || cache.remote.get(id).map(|item| &item.content) != change.content.as_ref()
+                });
+                Ok(cache)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(error).context("Could not open the local cloud workspace cache."),
         }
@@ -401,7 +416,7 @@ mod tests {
                     content: Content::Group {
                         parent: None,
                         name: "API".into(),
-                        variables: vec![],
+                        variables: [],
                     },
                 },
             )]),
@@ -475,7 +490,7 @@ mod tests {
                     Content::Group {
                         parent: None,
                         name: "API".into(),
-                        variables: Vec::new(),
+                        variables: [],
                     },
                 ),
             ]),
@@ -502,6 +517,63 @@ mod tests {
         assert_eq!(reopened.pending, cache.pending);
         assert_eq!(reopened.drafts[&id].request, cache.drafts[&id].request);
         assert_eq!(reopened.sidebar, cache.sidebar);
+        Ok(())
+    }
+
+    #[test]
+    fn local_variable_connection_is_opt_in_and_saved_per_workspace() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("first.json");
+        let second = directory.path().join("second.json");
+        let mut old_cache = serde_json::to_value(Cache::default())?;
+        old_cache
+            .as_object_mut()
+            .unwrap()
+            .remove("use_local_workspace_variables");
+        fs::write(&first, serde_json::to_vec(&old_cache)?)?;
+
+        let mut cache = Cache::open(&first)?;
+        assert!(!cache.use_local_workspace_variables);
+        cache.use_local_workspace_variables = true;
+        cache.save(&first)?;
+        assert!(Cache::open(&first)?.use_local_workspace_variables);
+        assert!(!Cache::open(&second)?.use_local_workspace_variables);
+        assert!(cache.pending.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn older_cloud_variables_are_ignored_and_variable_only_changes_are_dropped() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let file = directory.path().join("workspace.json");
+        let id = Uuid::new_v4();
+        let group = serde_json::json!({
+            "kind": "group", "parent": null, "name": "API",
+            "variables": [{"name": "auth_token", "value": "legacy-token"}]
+        });
+        let pending_group = serde_json::json!({
+            "kind": "group", "parent": null, "name": "API",
+            "variables": [{"name": "auth_token", "value": "pending-token"}]
+        });
+        fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!({
+                "remote": {id.to_string(): {"revision": 1, "content": group}},
+                "remote_revision": 1,
+                "pending": {id.to_string(): {"expected": 1, "content": pending_group}},
+                "drafts": {},
+                "environment": [{"name": "saved_token", "value": "private-token"}]
+            }))?,
+        )?;
+
+        let cache = Cache::open(&file)?;
+        assert!(cache.pending.is_empty());
+        assert_eq!(
+            serde_json::to_value(&cache.working()[&id])?["variables"],
+            serde_json::json!([])
+        );
+        cache.save(&file)?;
+        assert_eq!(Cache::open(&file)?.environment[0].value, "private-token");
         Ok(())
     }
 }

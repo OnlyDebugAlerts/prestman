@@ -921,7 +921,7 @@ impl Workspace {
                         }))),
             )
             .child(muted(
-                "The team can see URLs, bodies, scripts and headers. Collection variable values are cleared, and supported credential fields use local variable references. Review the preview for sensitive values before publishing.",
+                "The team can see URLs, bodies, scripts and headers. Requests use variables linked from Local workspace. Review the preview for sensitive values before publishing.",
             ))
             .children(publication.preview.as_ref().map(|preview| {
                 div().id("cloud-publication-preview").max_h(px(300.)).overflow_y_scroll()

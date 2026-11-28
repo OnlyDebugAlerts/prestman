@@ -46,13 +46,17 @@ impl Workspace {
         if mutations.is_empty() {
             return;
         }
+        if self.in_team() {
+            self.save_error = self
+                .save_linked_script_variables(mutations)
+                .err()
+                .map(|error| format!("Could not save Local workspace variables. {error:#}"));
+            return;
+        }
         for mutation in mutations {
             match mutation.scope.as_str() {
                 "globals" => mutation.apply(&mut self.global_variables),
                 "environment" => mutation.apply(&mut self.environment_variables),
-                "collection" if self.in_team() => {
-                    self.set_team_collection_value(collection_id, mutation)
-                }
                 "collection" => {
                     if let Some(collection) = self
                         .collections
@@ -65,12 +69,6 @@ impl Workspace {
                 _ => {}
             }
         }
-        if self.in_team() {
-            if let Err(error) = self.save_team_cache(false, None) {
-                self.save_error = Some(format!("Could not save script variables. {error:#}"));
-            }
-        } else {
-            self.persist("Could not save script variables", cx);
-        }
+        self.persist("Could not save script variables", cx);
     }
 }

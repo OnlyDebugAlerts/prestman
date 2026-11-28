@@ -118,9 +118,7 @@ fn preview_variable(
     let values = scopes
         .globals
         .iter()
-        .chain(&scopes.collection)
-        .chain(&scopes.folder)
-        .chain(&scopes.environment)
+        .chain(scopes.scoped_variables())
         .cloned();
     if span.path {
         let result = path_variables
@@ -130,11 +128,16 @@ fn preview_variable(
             .and_then(|row| crate::variables::resolve_text(&row.value, values));
         return ("Path variable", result);
     }
+    let (environment, globals) = if scopes.cloud_linked == Some(true) {
+        ("Local workspace / Environment", "Local workspace / Globals")
+    } else {
+        ("Environment", "Globals")
+    };
     let scope = [
-        ("Environment", &scopes.environment),
+        (environment, &scopes.environment),
         ("Folder", &scopes.folder),
         ("Collection", &scopes.collection),
-        ("Globals", &scopes.globals),
+        (globals, &scopes.globals),
     ]
     .into_iter()
     .find(|(_, rows)| {

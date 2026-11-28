@@ -1090,14 +1090,15 @@ impl Workspace {
     }
 
     fn variable_scopes_for(&self, group: Option<usize>) -> Scopes {
-        let mut scopes = Scopes::for_request(
+        if let Some(linked) = self.team_uses_local_workspace_variables() {
+            return Scopes::for_cloud(linked, &self.global_variables, &self.environment_variables);
+        }
+        Scopes::for_request(
             &self.global_variables,
             &self.environment_variables,
             &self.collections,
             group,
-        );
-        self.team_collection_values(scopes.collection_id, &mut scopes.collection);
-        scopes
+        )
     }
 
     fn send_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
